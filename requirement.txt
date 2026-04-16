@@ -1,0 +1,4 @@
+/*pytyon配置环境*/
+opencv-python
+numpy
+spacemit-ort
