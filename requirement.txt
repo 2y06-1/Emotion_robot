@@ -1,4 +1,23 @@
 /*pytyon配置环境*/
 opencv-python
-numpy
 spacemit-ort
+onnxruntime
+numpy
+//单独安装
+pip config set global.extra-index-url https://git.spacemit.com/api/v4/projects/33/packages/pypi/simple
+pip install spacemit-ort
+pip install numpy
+pip install opencv-python
+//以下命令应该可以直接安装这三个包 spacemit-ort onnxruntime numpy
+pip install --index-url https://git.spacemit.com/api/v4/projects/33/packages/pypi/simple spacemit-ort --break-system-packages
+pip install opencv-python
+//展示包版本
+pip list | grep -E "onnxruntime|spacemit|numpy|opencv"
+//测试 可不可spacmit加速 
+python -c pi'p
+"
+import onnxruntime as ort
+import spacemit_ort
+print(f'ONNX Runtime: {ort.__version__}')
+print(f'可用执行提供程序: {ort.get_available_providers()}')
+"

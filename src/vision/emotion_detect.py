@@ -2,6 +2,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import onnxruntime as ort
+import spacemit_ort
 
 class Emotion_Detect:
     def __init__(self, model_path):
