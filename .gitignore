@@ -1,6 +1,12 @@
 venv/
+
 __pycache__/
 *.pyc
+
 models/
+
 *.so
 build/
+
+.shaders/
+*.blob
