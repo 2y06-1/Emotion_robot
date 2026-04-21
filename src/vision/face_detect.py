@@ -30,7 +30,7 @@ class Face_Detect:
             # 部署到板子上边 self.face_model = ort.InferenceSession(
             #         model_path,
             #         session_options,
-            #         providers=["SpaceMITExecutionProvider"]  # 使用SpaceMIT硬件加速
+            #         providers=["SpaceMITExecutionProvider"]
             #     )
             self.face_model = ort.InferenceSession(self.model_path)
 
@@ -117,7 +117,6 @@ class Face_Detect:
 
             boxes.append([x1, y1, x2, y2, conf])
 
-        # ===== 4. NMS =====
         boxes = self.nms(boxes, iou_threshold=0.4)
 
         return boxes
@@ -145,8 +144,8 @@ if __name__ == "__main__":
     frame_id = 0
     boxes = []
 
-    current_dir = Path(__file__).resolve().parent.parent
-    model_path = current_dir.parent/ "model" / "yolov8n-face-lindevs.onnx"
+    current_dir = Path(__file__).resolve().parent
+    model_path = current_dir.parent.parent/ "model" / "vision" / "yolov8n-face-lindevs.onnx"
 
     face_model = Face_Detect(str(model_path))
     print(face_model)

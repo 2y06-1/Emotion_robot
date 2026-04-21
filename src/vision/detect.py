@@ -9,10 +9,10 @@ from src.vision.emotion_detect import Emotion_Detect
 
 if __name__ == "__main__":
 
-    BASE_DIR = Path(__file__).resolve().parent
+    BASE_DIR = Path(__file__).resolve().parent.parent
 
-    face_model_path = BASE_DIR / "model" / "yolov8n-face-lindevs.onnx"
-    emotion_model_path = BASE_DIR / "model" / "enet_b0_8_best_afew.onnx"
+    face_model_path = BASE_DIR / "model" / "vision" / "yolov8n-face-lindevs.onnx"
+    emotion_model_path = BASE_DIR / "model" / "vision" / "enet_b0_8_best_afew.onnx"
 
     face_model = Face_Detect(str(face_model_path))
     emotion_model = Emotion_Detect(str(emotion_model_path))

@@ -14,7 +14,7 @@ pip install opencv-python
 //展示包版本
 pip list | grep -E "onnxruntime|spacemit|numpy|opencv"
 //测试 可不可spacmit加速 
-python -c pi'p
+python -c 
 "
 import onnxruntime as ort
 import spacemit_ort
