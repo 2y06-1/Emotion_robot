@@ -3,6 +3,9 @@ import cv2
 import numpy as np
 import onnxruntime as ort
 
+current_dir = Path(__file__).resolve().parent
+model_path = current_dir.parent.parent/ "model" / "vision" / "yolov8n-face-lindevs.onnx"
+
 class Face_Detect:
     def __init__(self,model_path):
         self.model_path = model_path
@@ -36,7 +39,7 @@ class Face_Detect:
 
         except Exception as e:
             print(f"加载模型失败: {e}")
-            self.emotion_model = None
+            self.face_model = None
 
     def img_convert(self, img,img_size):
         try:
@@ -143,9 +146,6 @@ class Face_Detect:
 if __name__ == "__main__":
     frame_id = 0
     boxes = []
-
-    current_dir = Path(__file__).resolve().parent
-    model_path = current_dir.parent.parent/ "model" / "vision" / "yolov8n-face-lindevs.onnx"
 
     face_model = Face_Detect(str(model_path))
     print(face_model)

@@ -3,6 +3,9 @@ import cv2
 import numpy as np
 import onnxruntime as ort
 
+current_dir = Path(__file__).resolve().parent
+model_path = current_dir.parent.parent/ "model" / "vision" / "enet_b0_8_best_afew.onnx"
+
 class Emotion_Detect:
     def __init__(self, model_path):
         self.model_path = model_path
@@ -81,8 +84,7 @@ class Emotion_Detect:
 
 if __name__ == "__main__":
 
-    current_dir = Path(__file__).resolve().parent
-    model_path = current_dir.parent.parent/ "model" / "vision" / "enet_b0_8_best_afew.onnx"
+
 
     emotion_model = Emotion_Detect(str(model_path))
     print(emotion_model)

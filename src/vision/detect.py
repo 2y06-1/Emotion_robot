@@ -2,14 +2,13 @@ import sys
 from pathlib import Path
 
 sys.path.append(str(Path(__file__).resolve().parent))
+BASE_DIR = Path(__file__).resolve().parent.parent
 
 import cv2
 from src.vision.face_detect import Face_Detect
 from src.vision.emotion_detect import Emotion_Detect
 
 if __name__ == "__main__":
-
-    BASE_DIR = Path(__file__).resolve().parent.parent
 
     face_model_path = BASE_DIR / "model" / "vision" / "yolov8n-face-lindevs.onnx"
     emotion_model_path = BASE_DIR / "model" / "vision" / "enet_b0_8_best_afew.onnx"

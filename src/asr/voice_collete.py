@@ -4,6 +4,9 @@ from pathlib import Path
 import time
 import os
 
+current_dir = Path(__file__).resolve().parent
+voice_path = current_dir.parent.parent/ "wav"
+
 class Voice_Collect:
     def __init__(self, voice_path):
         self.voice_path = voice_path
@@ -59,8 +62,6 @@ class Voice_Collect:
 
 
 if __name__ == "__main__":
-    current_dir = Path(__file__).resolve().parent
-    voice_path = current_dir.parent.parent/ "voice"
 
     vc=Voice_Collect(voice_path)
     while True:
