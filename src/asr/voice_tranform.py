@@ -14,7 +14,7 @@ class Voice_Transform:
         temp_path = "/tmp/temp.wav"
 
         shutil.copy(wav_path, temp_path)
-
+cd
         text = self.model.audio_to_text(temp_path)
 
         if os.path.exists(temp_path):
