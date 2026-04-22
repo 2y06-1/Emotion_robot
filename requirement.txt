@@ -5,6 +5,8 @@ opencv-python
 spacemit-ort
 onnxruntime
 numpy
+//运行scripts下的vision_env.sh脚本即可自动安装
+
 //单独安装
 pip config set global.extra-index-url https://git.spacemit.com/api/v4/projects/33/packages/pypi/simple
 pip install spacemit-ort
@@ -26,3 +28,12 @@ print(f'可用执行提供程序: {ort.get_available_providers()}')
 "
 
 /*asr*/
+//运行scripts下的voice_env.sh脚本即可自动安装
+
+/*llm*/
+//运行scripts下的llm_env.sh脚本即可自动安装
+sudo apt update
+sudo apt install spacemit-ollama-toolkit
+
+ollama list
+sudo apt show spacemit-ollama-toolkit
