@@ -1,52 +1,64 @@
 import requests
 import json
 
-OLLAMA_API_URL = "http://localhost:11434/api/chat"
+class Ollama_chat:
+    def __init__(self, base_url, model_name):
+        self.base_url = base_url
+        self.model_name = model_name
+        self.api_url = f"{base_url}/api/chat"
+        self.history = []
 
-conversation_history = []
+    def history_append(self, role, content):
+        self.history.append({"role": role, "content": content})
+        
+        with open("/home/bianbu/mycode/src/llm/chat_history.txt", "a") as f:
+            f.write(f"{role}: {content}\n")
+ 
+    def chat_ollama(self, user_message):
+        self.history_append("user", user_message)
 
-def chat_with_ollama(prompt: str):
-    conversation_history.append({"role": "user", "content": prompt})
+        payload = {
+            "model": self.model_name,
+            "messages": self.history,
+            "stream": True
+        }
 
-    payload = {
-        "model": "qwen3:0.6b",  
-        "messages": conversation_history,
-        "stream": True  
-    }
+        response = requests.post(self.api_url, json=payload, stream=True)
+        print(f"{self.model_name} > ", end="", flush=True)
+        full_reply = ""
 
-    try:
-        with requests.post(OLLAMA_API_URL, json=payload, stream=True) as response:
-            response.raise_for_status() 
-            full_response = ""
-            print("\n助手: ", end="", flush=True)
-
-            for line in response.iter_lines():
-                if line:
-                    chunk = json.loads(line.decode('utf-8'))
-                    content = chunk['message']['content']
+        for line in response.iter_lines():
+            if line:
+                chunk = json.loads(line.decode('utf-8'))
+                content = chunk.get("message", {}).get("content", "")
+                if content:
                     print(content, end="", flush=True)
-                    full_response += content
+                    full_reply += content
+                if chunk.get("done"):
+                    break
+        print()
+        self.history_append("assistant", full_reply)
 
-                    if chunk.get('done', False):
-                        conversation_history.append({"role": "assistant", "content": full_response})
-                        print() 
+    def clear_history(self):
+        self.history = []
+        print("对话历史已清空")
 
-    except requests.exceptions.RequestException as e:
-        print(f"无法连接到Ollama API: {e}")
-    except json.JSONDecodeError as e:
-        print(f"解析JSON响应失败: {e}")
+    def show_history(self):
+        for msg in self.history:
+            print(f"{msg['role']}: {msg['content'][:100]}...")
 
 
 if __name__ == "__main__":
-    print("Ollama 命令行聊天程序")
-    print("模型: qwen3:0.6b | 输入 'exit' 或 'quit' 退出。")
-    print("-" * 50)
+    # 只需要初始化一次
+    bot = Ollama_chat("http://localhost:11434", "qwen3:0.6b")
+    print("情感陪伴机器人已启动（流式多轮对话），输入 quit 退出，clear 清空历史\n")
 
     while True:
         user_input = input("你: ")
-        if user_input.lower() in ["exit", "quit"]:
-            print("再见!")
+        if user_input.lower() == "quit":
+            print("quit")
             break
-        
-        chat_with_ollama(user_input)
-
+        elif user_input.lower() == "clear":
+            bot.clear_history()
+            continue
+        bot.chat_ollama(user_input)
