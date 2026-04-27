@@ -29,6 +29,6 @@ class Voice_Transform:
 
 if __name__ == "__main__":
     sensevoice_model=Voice_Transform(sensevoice_model_path,wav_path)
-    sensevoice_model.speech_to_text()
+    text=sensevoice_model.speech_to_text()
     while True:
         pass
