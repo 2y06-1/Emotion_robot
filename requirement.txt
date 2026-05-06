@@ -37,3 +37,7 @@ sudo apt install spacemit-ollama-toolkit
 
 ollama list
 sudo apt show spacemit-ollama-toolkit
+
+/*tts*/
+//能通 但是声音很难听
+sudo apt install espeak-ng
