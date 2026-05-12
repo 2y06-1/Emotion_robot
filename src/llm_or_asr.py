@@ -14,7 +14,7 @@ model_name = "my_test:latest"
 txt_path = current_dir.parent/"model"/"llm"/"chat_history.txt"
 
 from src.asr.txt_tranform import Text_Tranform
-from src.asr.voice_collect import Voice_Collect
+from src.asr.new.new_voice_collect import Voice_Collect,has_voice
 from src.asr.voice_tranform import Voice_Transform
 from src.llm.llm  import Ollama_chat 
 
@@ -32,6 +32,13 @@ def main():
 
     while True:
         wav_file = vc.record_audio()
+        if not wav_file:
+            continue
+        if not has_voice(wav_file, threshold=500, min_voice_sec=2):
+            print("录音全程静音，跳过")
+            print(wav_file)
+            continue
+            
         text = sensevoice_model.speech_to_text(wav_file)
         print(text)
         print("begin")
@@ -39,8 +46,7 @@ def main():
         print("end")
         print(full_reply)
         tts.text_to_speech(full_reply)
-        if not wav_file:
-            break
+
 
 if __name__ == "__main__":
     main()
