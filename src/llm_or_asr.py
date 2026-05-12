@@ -26,6 +26,8 @@ bot = Ollama_chat(base_url, model_name, txt_path)
 print("llm succees")
 tts = Text_Tranform()
 print("tts success")
+
+
 def main():
 
     while True:
