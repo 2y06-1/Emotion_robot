@@ -19,12 +19,11 @@ pip install opencv-python
 //展示包版本
 pip list | grep -E "onnxruntime|spacemit|numpy|opencv"
 //测试 可不可spacmit加速 
-python -c 
-"
+python3.13 -c "
 import onnxruntime as ort
 import spacemit_ort
-print(f'ONNX Runtime: {ort.__version__}')
-print(f'可用执行提供程序: {ort.get_available_providers()}')
+print('ONNX Runtime:', ort.__version__)
+print('可用执行提供程序:', ort.get_available_providers())
 "
 
 /*asr*/
@@ -41,3 +40,5 @@ sudo apt show spacemit-ollama-toolkit
 /*tts*/
 //能通 但是声音很难听
 sudo apt install espeak-ng
+//调音量
+alsamixer -c 2
