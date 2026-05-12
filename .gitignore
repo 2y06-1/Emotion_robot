@@ -7,3 +7,7 @@ build/
 .shaders/
 *.blob
 wav/
+src/bert-base-uncased/
+src/bert-base-multilingual-uncased/
+src/asr/bert-base-multilingual-uncased/
+src/asr/bert-base-uncased/
