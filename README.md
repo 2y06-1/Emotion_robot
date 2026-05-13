@@ -20,6 +20,7 @@ Emotion_robot/
 │ ├── vision/ 
 │ ├── llm_or_asr.py 
 │ └── main.py 
+│ └── vision_all.py
 ├── venv/ # Python 虚拟环境
 ├── wav/ # 音频文件
 │ ├── init.wav
