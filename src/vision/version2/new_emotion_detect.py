@@ -86,7 +86,7 @@ class Emotion_Detect:
 
     def get_label(self, idx):
 
-        labels = ["Sad","Contempt","Angry","Surprise","Fear","Neutral","Happy","Disgust"]
+        labels = ["Angry","Contempt","Happy","Surprise","Happy","Neutral","Sad","Disgust"]
 
         if 0 <= idx < len(labels):
             return labels[idx]

@@ -24,7 +24,7 @@ class Voice_Collect:
                 except Exception as e:
                     print("删除失败:", e)
 
-    def record_audio(self, max_duration=20, silence_threshold=500, silence_duration=3.0):
+    def record_audio(self, max_duration=20, silence_threshold=600, silence_duration=3.0):
         save_path = self.voice_path
         save_path.mkdir(parents=True, exist_ok=True)
         filename = f"audio_{int(time.time())}.wav"
@@ -70,7 +70,7 @@ class Voice_Collect:
         self.clean_files(max_files=4)
         return str(wav_path)
 
-def has_voice(wav_file, threshold=500, min_voice_sec=2):
+def has_voice(wav_file, threshold=600, min_voice_sec=2):
     with wave.open(str(wav_file), 'rb') as wf:
         frames = wf.readframes(wf.getnframes())
         audio = np.frombuffer(frames, dtype=np.int16)
@@ -91,7 +91,7 @@ def main():
         wav_file = vc.record_audio()
         if not wav_file:
             continue
-        if not has_voice(wav_file, threshold=500, min_voice_sec=2):
+        if not has_voice(wav_file, threshold=500, min_voice_sec=3):
             print("录音全程静音，跳过")
             print(wav_file)
             continue

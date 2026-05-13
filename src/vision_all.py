@@ -4,7 +4,7 @@ import time
 import cv2
 from collections import deque, Counter
 
-BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent
+BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(BASE_DIR))
 
 from src.vision.version2.new_face_detect import Face_Detect
