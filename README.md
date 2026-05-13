@@ -26,5 +26,6 @@ Emotion_robot/
 │ ├── init.wav
 │ └── zh.mp3
 ├── .gitignore
+├── knowledge.txt
 ├── README.md 
 └── requirements.txt #python 安装依赖
