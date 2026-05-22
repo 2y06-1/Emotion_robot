@@ -1,38 +1,24 @@
 import sys
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent.parent.parent
-sys.path.append(str(BASE_DIR))
+BASE_DIR = Path(__file__).resolve().parent.parent    # src/
+sys.path.insert(0, str(BASE_DIR / "asr"))              # new_txt_tranform 在这里
+sys.path.insert(0, str(BASE_DIR / "llm"))
 
-from src.asr.new_txt_tranform import Text_Tranform
+from new_txt_tranform import Text_Tranform
 
+def main():
+    print("[TTS Worker] 正在加载模型...", flush=True)
+    tts = Text_Tranform()
+    print("[TTS Worker] 模型就绪，等待输入...", flush=True)
 
-print("初始化 TTS...", flush=True)
-
-tts = Text_Tranform()
-
-print("TTS 初始化完成", flush=True)
-
-
-while True:
-    try:
-        text = sys.stdin.readline()
-
-        if not text:
-            break
-
-        text = text.strip()
-
-        if not text:
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
             continue
+        print(f"[TTS Worker] 收到: {line}", flush=True)
+        tts.text_to_speech(line)
+        print("TTS_DONE", flush=True)        # 主进程等待这个标记
 
-        tts.text_to_speech(text)
-
-        # 通知主程序：播放完成
-        print("TTS_DONE", flush=True)
-
-    except KeyboardInterrupt:
-        break
-
-    except Exception as e:
-        print(f"TTS worker error: {e}", flush=True)
+if __name__ == "__main__":
+    main()

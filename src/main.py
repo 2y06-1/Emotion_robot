@@ -6,16 +6,17 @@ import random
 import subprocess
 from pathlib import Path
 import tempfile
-import match
+import re
 
 from PyQt5.QtWidgets import QApplication, QMessageBox
 from PyQt5.QtCore import QTimer, QObject, pyqtSignal
 
-# ===== 路径配置（按你的项目结构调整） =====
+# ===== 路径配置 =====
 BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(BASE_DIR / "src"))
 sys.path.append(str(BASE_DIR / "src" / "asr"))
 sys.path.append(str(BASE_DIR / "src" / "llm"))
+sys.path.append(str(BASE_DIR / "src" / "ui"))
 
 from ui import MainWindow
 from new_voice_collect import Voice_Collect
@@ -31,17 +32,25 @@ CHAT_HISTORY = BASE_DIR / "model" / "llm" / "chat_history.txt"
 INIT_WAV = BASE_DIR / "wav" / "init.wav"
 EMOTION_WAV = BASE_DIR / "wav"
 
+# TTS 子进程配置（根据你的环境修改）
+TTS_VENV_PYTHON = "/home/bianbu/Emotion_robot/venv_tts/bin/python"
+TTS_WORKER_PATH = "/home/bianbu/Emotion_robot/src/asr/tts_worker.py"
+
 class EmotionRobot(QObject):
-    # ===== UI 信号（主线程安全） =====
+    # ===== UI 信号 =====
     ui_clear_chat = pyqtSignal()
     ui_append_user = pyqtSignal(str)
     ui_append_ai = pyqtSignal(str)
     ui_append_system = pyqtSignal(str)
-    ui_append_emotion = pyqtSignal(str, str)          # 目前保留，但不主动使用
-    ui_set_state_emotion_detecting = pyqtSignal()     # 切换到情绪检测界面
-    ui_set_state_chatting = pyqtSignal()              # 切换到聊天界面
+    ui_append_emotion = pyqtSignal(str, str)
+    ui_set_state_emotion_detecting = pyqtSignal()
+    ui_set_state_chatting = pyqtSignal()
     ui_set_state_error = pyqtSignal(str)
-    ui_set_emotion = pyqtSignal(str, str)             # 更新主界面的情绪显示
+    ui_set_emotion = pyqtSignal(str, str)
+
+    # TTS 播放状态信号（主线程安全）
+    tts_start = pyqtSignal(str)   # 通知播放
+    tts_stop = pyqtSignal()       # 播放完成
 
     def __init__(self):
         super().__init__()
@@ -54,12 +63,13 @@ class EmotionRobot(QObject):
         self.llm_bot = Ollama_chat(OLLAMA_URL, MODEL_NAME, CHAT_HISTORY)
 
         # 状态标志
-        self.current_mode = "emotion"      # "emotion" 或 "chat"
+        self.current_mode = "emotion"
         self.is_recording = False
-        self.active_emotion = None         # 进入聊天后持续使用的情绪标签
-        self.pending_strong_emotion = None # 后台检测到的、待使用的强烈情绪
+        self.is_playing_tts = False      # 新增：TTS 播放中标志，防止录音
+        self.active_emotion = None
+        self.pending_strong_emotion = None
 
-        # 连接 UI 信号到主线程槽函数
+        # 连接 UI 信号
         self.ui_clear_chat.connect(self._on_ui_clear_chat)
         self.ui_append_user.connect(self.ui.append_user_message)
         self.ui_append_ai.connect(self.ui.append_ai_message)
@@ -70,26 +80,100 @@ class EmotionRobot(QObject):
         self.ui_set_state_error.connect(self.ui.set_state_error)
         self.ui_set_emotion.connect(self.ui.set_emotion)
 
-        # 连接按钮信号
+        # 连接按钮
         self.ui.record_button_clicked.connect(self.on_record_button)
         self.ui.exit_chat_clicked.connect(self.on_exit_chat)
         self.ui.exit_program_clicked.connect(self.on_exit_program)
 
-        # 后台情绪监测定时器（模拟，每 5 秒执行一次）
+        # 后台情绪模拟定时器
         self.emotion_timer = QTimer()
         self.emotion_timer.timeout.connect(self._simulate_emotion_detection)
         self.emotion_timer.start(5000)
 
-        # 启动界面
+        # 启动 TTS 子进程（独立线程，不阻塞主界面）
+        self._start_tts_process()
+
+        # 连接 TTS 控制信号
+        self.tts_start.connect(self._on_tts_start)
+        self.tts_stop.connect(self._on_tts_stop)
+
+        # 界面启动
         self.ui.showFullScreen()
         self._play_init_sound()
 
+    # ---------- TTS 子进程管理 ----------
+    def _start_tts_process(self):
+        try:
+            self.tts_proc = subprocess.Popen(
+                [TTS_VENV_PYTHON, TTS_WORKER_PATH],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+            # 读取启动信息（模型加载完成标志）
+            startup = self.tts_proc.stdout.readline()
+            print(f"[TTS] {startup.strip()}", flush=True)
+            print("[Main] TTS 子进程已启动", flush=True)
+        except Exception as e:
+            print(f"[Main] 无法启动 TTS 子进程: {e}", flush=True)
+            self.tts_proc = None
+
+    def _cleanup_tts(self):
+        if self.tts_proc:
+            self.tts_proc.terminate()
+            try:
+                self.tts_proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self.tts_proc.kill()
+            self.tts_proc = None
+
+    # ---------- 语音播放（在线程中运行） ----------
+    def _play_tts_text(self, text):
+        """阻塞式播放，在独立线程中调用"""
+        if not text.strip() or self.tts_proc is None or self.tts_proc.stdin is None:
+            return
+        try:
+            self.tts_proc.stdin.write(text.strip() + "\n")
+            self.tts_proc.stdin.flush()
+            while True:
+                line = self.tts_proc.stdout.readline()
+                if not line:
+                    break
+                line = line.strip()
+                print(line, flush=True)
+                if line == "TTS_DONE":
+                    break
+        except Exception as e:
+            print(f"[TTS] 播放异常: {e}", flush=True)
+
+    # ---------- 播放控制信号槽 ----------
+    def _on_tts_start(self, text):
+        """启动播放线程"""
+        self.is_playing_tts = True
+        self.ui.record_button.setEnabled(False)   # 播放时禁用录音按钮
+        def worker():
+            self._play_tts_text(text)
+            self.tts_stop.emit()
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_tts_stop(self):
+        self.is_playing_tts = False
+        self.ui.record_button.setEnabled(True)
+        # 根据当前模式刷新 UI 状态，确保按钮文本/提示正确
+        if self.current_mode == "emotion":
+            self.ui_set_state_emotion_detecting.emit()
+        else:
+            self.ui_set_state_chatting.emit()
     # ---------- UI 槽函数 ----------
     def _on_ui_clear_chat(self):
         self.ui.chat_box.clear()
 
     # ---------- 按钮事件 ----------
     def on_record_button(self):
+        if self.is_playing_tts:                # 播放中不允许录音
+            return
         if not self.is_recording:
             self._start_recording()
         else:
@@ -105,14 +189,13 @@ class EmotionRobot(QObject):
         self.voice_collector.stop_recording()
 
     def on_exit_chat(self):
-        """退出聊天，重置所有状态，回到情绪检测"""
         if self.is_recording:
             self.voice_collector.stop_recording()
             self.is_recording = False
         self.llm_bot.history_clear()
         self.current_mode = "emotion"
         self.active_emotion = None
-        self.pending_strong_emotion = None      # 清空待处理情绪
+        self.pending_strong_emotion = None
         self.ui_clear_chat.emit()
         self.ui_set_state_emotion_detecting.emit()
         self.ui_set_emotion.emit("--", "等待检测人物情绪")
@@ -125,6 +208,7 @@ class EmotionRobot(QObject):
         if reply == QMessageBox.Yes:
             if self.is_recording:
                 self.voice_collector.stop_recording()
+            self._cleanup_tts()
             self.app.quit()
 
     # ---------- 录音线程 ----------
@@ -146,7 +230,6 @@ class EmotionRobot(QObject):
             self.is_recording = False
 
     def _after_record_reset(self):
-        """录音结束后的通用状态恢复（无有效声音时用）"""
         if self.current_mode == "emotion":
             self.ui_set_state_emotion_detecting.emit()
         else:
@@ -162,56 +245,41 @@ class EmotionRobot(QObject):
             return
 
         if self.current_mode == "emotion":
-            # 使用后台检测的 pending 情绪，不再重复检测
             if self.pending_strong_emotion:
                 emotion = self.pending_strong_emotion
-                self.pending_strong_emotion = None          # 消费掉
+                self.pending_strong_emotion = None
                 self._enter_chat_with_emotion(user_text, emotion)
             else:
                 self._start_normal_chat(user_text)
         else:
             self._handle_chat_message(user_text)
 
-    # ---------- 后台情绪检测模拟 ----------
+    # ---------- 后台情绪模拟 ----------
     def _simulate_emotion_detection(self):
-        """
-        定时检测情绪（实际项目中替换为摄像头/声纹等实时检测）
-        仅当处于情绪检测模式且没有录音时，才会设置 pending_strong_emotion
-        """
         if self.current_mode != "emotion" or self.is_recording:
             return
-
-        # 模拟：10% 概率检测到强烈情绪，其余为 Neutral
         if random.random() < 0.1:
-            # 随机一个强烈情绪
             emotion = random.choice(["Happy", "Sad", "Angry", "Surprise", "Fear"])
-            # 如果与当前 pending 相同则忽略
             if self.pending_strong_emotion == emotion:
                 return
-
             self.pending_strong_emotion = emotion
             ask_text = f"检测到您似乎{emotion}，愿意和我聊聊吗？"
             print(ask_text)
             self.ui_append_system.emit(ask_text)
-            self._play_tts(emotion)
-        # 若检测到 Neutral 则不做任何事
+            self._play_emotion_wav(emotion)   # 播放预置情绪语音
 
-    # ---------- 进入聊天模式（带情绪） ----------
+    # ---------- 进入聊天模式 ----------
     def _enter_chat_with_emotion(self, user_text, emotion):
-        """进入带情绪标签的聊天模式（不显示额外提示）"""
         self.current_mode = "chat"
         self.active_emotion = emotion
         self.llm_bot.history_clear()
         self.ui_clear_chat.emit()
         self.ui_set_state_chatting.emit()
         self.ui_append_user.emit(user_text)
-
         enhanced = f"[用户当前情绪：{emotion}] {user_text}"
         self._generate_ai_reply(enhanced)
 
-    # ---------- 进入普通聊天模式 ----------
     def _start_normal_chat(self, user_text):
-        """进入普通聊天模式（无情绪标签）"""
         self.current_mode = "chat"
         self.active_emotion = None
         self.llm_bot.history_clear()
@@ -220,9 +288,7 @@ class EmotionRobot(QObject):
         self.ui_append_user.emit(user_text)
         self._generate_ai_reply(user_text)
 
-    # ---------- 聊天模式中的后续对话 ----------
     def _handle_chat_message(self, user_text):
-        """聊天模式下的录音处理，根据 active_emotion 决定是否添加标签"""
         self.ui_append_user.emit(user_text)
         if self.active_emotion:
             message = f"[用户当前情绪：{self.active_emotion}] {user_text}"
@@ -230,7 +296,7 @@ class EmotionRobot(QObject):
             message = user_text
         self._generate_ai_reply(message)
 
-    # ---------- 调用 LLM（子线程） ----------
+    # ---------- LLM 生成（独立线程） ----------
     def _generate_ai_reply(self, message):
         def worker():
             try:
@@ -242,43 +308,22 @@ class EmotionRobot(QObject):
                 print(f"[LLM 错误] {e}")
             print(f"[AI 回复] {reply}")
             self.ui_append_ai.emit(reply)
+            # 播放 AI 回复的语音
+            self.tts_start.emit(reply)
         threading.Thread(target=worker, daemon=True).start()
 
-    # ---------- TTS 播放（占位） ----------
-    def _play_tts(self, text):
-        match text:
-            case "Happy":
-                wav = EMOTION_WAV / "happy.wav"
-                subprocess.run(
-                ["aplay", "-D", "plughw:0,0", wav],
-                check=True,
+    # ---------- 播放预置情绪 WAV ----------
+    def _play_emotion_wav(self, emotion):
+        """播放固定的情绪提示音（短音频）"""
+        wav_name = emotion.lower() + ".wav"
+        wav_path = EMOTION_WAV / wav_name
+        if wav_path.exists():
+            subprocess.run(
+                ["aplay", "-D", "plughw:0,0", str(wav_path)],
+                check=False,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                )
-            case "Sad":
-                wav = EMOTION_WAV / "sad.wav"
-                subprocess.run(
-                ["aplay", "-D", "plughw:0,0", wav],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                )
-            case "Angry":
-                wav = EMOTION_WAV / "angry.wav"
-                subprocess.run(
-                ["aplay", "-D", "plughw:0,0", wav],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                )
-            case "Surprise":
-                wav = EMOTION_WAV / "surprise.wav"
-                subprocess.run(
-                ["aplay", "-D", "plughw:0,0", wav],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                )
+                stderr=subprocess.PIPE
+            )
 
     # ---------- 辅助方法 ----------
     def _is_valid_chinese(self, text, threshold=0.3):

@@ -92,14 +92,12 @@ if __name__ == "__main__":
 
         cv2.putText(frame, f"FPS: {fps:.1f}", (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-        cv2.imshow("Face Emotion", frame)
 
         key = cv2.waitKey(1)
         if key == 27:
             break
 
     cap.release()
-    cv2.destroyAllWindows()
 '''
 import sys
 from pathlib import Path
