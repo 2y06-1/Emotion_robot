@@ -6,8 +6,5 @@ models/
 build/
 .shaders/
 *.blob
-wav/
-src/bert-base-uncased/
-src/bert-base-multilingual-uncased/
-src/asr/bert-base-multilingual-uncased/
-src/asr/bert-base-uncased/
+model/llm/qwen1_5-0_5b-chat-q4_0.gguf
+model/asr/model.onnx
