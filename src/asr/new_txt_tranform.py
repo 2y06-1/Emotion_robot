@@ -34,12 +34,12 @@ class Text_Tranform:
         self.num_threads = int(os.getenv("TTS_NUM_THREADS", "4"))
 
         # aishell3 是多说话人模型，sid=66 是你目前测试用的音色
-        self.sid = int(os.getenv("TTS_SID", "66"))
-        self.speed = float(os.getenv("TTS_SPEED", "1.0"))
+        self.sid = int(os.getenv("TTS_SID", "55"))
+        self.speed = float(os.getenv("TTS_SPEED", "1.5"))
         self.silence_scale = float(os.getenv("TTS_SILENCE_SCALE", "0.2"))
 
         # 音频设备。如果播放失败，可以运行前改成 APLAY_DEVICE=default
-        self.aplay_device = os.getenv("APLAY_DEVICE", "plughw:0,0")
+        self.aplay_device = os.getenv("APLAY_DEVICE", "plughw:2,0")
 
         # 限制 TTS 文本长度，避免大模型回复太长导致等待时间过久
         self.max_chars = int(os.getenv("TTS_MAX_CHARS", "100"))
@@ -111,12 +111,15 @@ class Text_Tranform:
     def _clean_text(self, text: str) -> str:
         text = text.strip()
 
+        # ★ 强制逗号 → 句号（产生明显停顿）
+        text = text.replace('，', '。').replace(',', '。')
+
+        # 以下原有的清理逻辑保持不变
         text = re.sub(r"", "", text, flags=re.S)
         text = re.sub(r"<.*?>", "", text)
         text = re.sub(r"[#>*`_\[\]{}]", "", text)
         text = re.sub(r"\s+", " ", text).strip()
 
-        # 兜底限制长度（可适当放宽，比如 200，或完全禁用）
         if self.max_chars and len(text) > self.max_chars:
             text = text[:self.max_chars]
 
