@@ -1,34 +1,46 @@
 # coding: utf-8
+from __future__ import annotations
+
+import argparse
+import time
 from pathlib import Path
+
 import cv2
 import numpy as np
 import onnxruntime as ort
-import time
+
 
 class Face_Detect:
-    def __init__(self, model_path):
+    def __init__(self, model_path, provider="auto", threads=4):
         self.face_model = None
         self.model_path = str(model_path)
+        self.provider = provider
+        self.threads = threads
         self.load_model()
 
     def load_model(self):
         try:
             session_options = ort.SessionOptions()
-            session_options.intra_op_num_threads = 4
-            session_options.inter_op_num_threads = 4
+            session_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+            session_options.intra_op_num_threads = self.threads
+            session_options.inter_op_num_threads = 1
 
-            avail = ort.get_available_providers()
-            if "SpaceMITExecutionProvider" in avail:
-                providers = ["SpaceMITExecutionProvider", "CPUExecutionProvider"]
-            else:
+            if self.provider == "cpu":
                 providers = ["CPUExecutionProvider"]
+            else:
+                avail = ort.get_available_providers()
+                providers = []
+                if "SpaceMITExecutionProvider" in avail:
+                    providers.append("SpaceMITExecutionProvider")
+                providers.append("CPUExecutionProvider")
 
             self.face_model = ort.InferenceSession(
                 self.model_path,
                 session_options,
-                providers=providers
+                providers=providers,
             )
-            print(f"load face_model success, using providers: {self.face_model.get_providers()}")
+            print(f"load face_model success: {self.model_path}")
+            print(f"using providers: {self.face_model.get_providers()}")
         except Exception as e:
             print(f"加载模型失败: {e}")
             self.face_model = None
@@ -68,10 +80,10 @@ class Face_Detect:
             boxes = [box for box in boxes if self.iou(best, box) < iou_threshold]
         return keep
 
-    def detect_face(self, img, img_size, conf_threshold=0.5):
+    def detect_face(self, img, img_size=224, conf_threshold=0.5, iou_threshold=0.4):
         h, w = img.shape[:2]
         input_img = self.img_convert(img, img_size)
-        if input_img is None:
+        if input_img is None or self.face_model is None:
             return []
 
         outputs = self.face_model.run(None, {self.face_model.get_inputs()[0].name: input_img})
@@ -81,7 +93,7 @@ class Face_Detect:
 
         boxes = []
         for p in preds:
-            cx, cy, bw, bh, conf = p
+            cx, cy, bw, bh, conf = p[:5]
             if conf < conf_threshold:
                 continue
             x1 = cx - bw / 2
@@ -94,10 +106,9 @@ class Face_Detect:
             y2 = int(y2 * h / img_size)
             boxes.append([x1, y1, x2, y2, float(conf)])
 
-        boxes = self.nms(boxes, iou_threshold=0.4)
-        return boxes
+        return self.nms(boxes, iou_threshold=iou_threshold)
 
-    def crop(self, frame, boxes, pad=20):
+    def crop(self, frame, boxes, pad=20, extra_ratio=0.25):
         faces = []
         h, w = frame.shape[:2]
         for (x1, y1, x2, y2, conf) in boxes:
@@ -105,6 +116,11 @@ class Face_Detect:
             y1p = max(0, y1 - pad)
             x2p = min(w, x2 + pad)
             y2p = min(h, y2 + pad)
+            extra = int(max(x2p - x1p, y2p - y1p) * extra_ratio)
+            x1p = max(0, x1p - extra)
+            y1p = max(0, y1p - extra)
+            x2p = min(w, x2p + extra)
+            y2p = min(h, y2p + extra)
             face = frame[y1p:y2p, x1p:x2p]
             if face.size == 0:
                 continue
@@ -112,31 +128,46 @@ class Face_Detect:
         return faces
 
 
-# ==================== 主程序 ====================
-if __name__ == "__main__":
-    current_dir = Path(__file__).resolve().parent.parent
-    model_path = current_dir.parent.parent / "model" / "vision" / "best.onnx"
-    face_model = Face_Detect(str(model_path))
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run uint8 face detection on camera frames.")
+    parser.add_argument("--model", default="/home/bianbu/Emotion_robot/model/vision/best.onnx")
+    parser.add_argument("--camera", default="/dev/video20")
+    parser.add_argument("--provider", choices=["auto", "cpu"], default="auto")
+    parser.add_argument("--threads", type=int, default=4)
+    parser.add_argument("--img-size", type=int, default=224)
+    parser.add_argument("--detect-every", type=int, default=3)
+    parser.add_argument("--conf", type=float, default=0.5)
+    parser.add_argument("--iou", type=float, default=0.4)
+    parser.add_argument("--pad", type=int, default=20)
+    parser.add_argument("--extra-ratio", type=float, default=0.25)
+    parser.add_argument("--no-flip", action="store_true")
+    parser.add_argument("--no-show", action="store_true")
+    return parser.parse_args()
 
-    cap = cv2.VideoCapture("/dev/video20", cv2.CAP_V4L2)
-    
+
+if __name__ == "__main__":
+    args = parse_args()
+    face_model = Face_Detect(args.model, provider=args.provider, threads=args.threads)
+
+    cap = cv2.VideoCapture(args.camera, cv2.CAP_V4L2)
     if not cap.isOpened():
         print("摄像头打开失败，退出")
         exit(1)
 
     frame_id = 0
     boxes = []
-
     frame_counter = 0
     start_time = time.time()
     fps = 0.0
+    infer_ms = 0.0
 
     while True:
         ret, frame = cap.read()
         if not ret:
             break
 
-        frame = cv2.flip(frame, 1)
+        if not args.no_flip:
+            frame = cv2.flip(frame, 1)
 
         frame_counter += 1
         elapsed = time.time() - start_time
@@ -144,26 +175,34 @@ if __name__ == "__main__":
             fps = frame_counter / elapsed
             frame_counter = 0
             start_time = time.time()
-            print(f"\r实时帧率: {fps:.1f} FPS  ", end="")   # ← 终端显示 FPS
-
-        cv2.putText(frame, f"FPS: {fps:.1f}", (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            print(f"\r实时帧率: {fps:.1f} FPS  face: {infer_ms:.1f} ms  boxes: {len(boxes)}  ", end="")
 
         frame_id += 1
-        if frame_id % 3 == 0:
-            boxes = face_model.detect_face(frame, img_size=224, conf_threshold=0.5)
+        if frame_id % args.detect_every == 0:
+            t0 = time.perf_counter()
+            boxes = face_model.detect_face(
+                frame,
+                img_size=args.img_size,
+                conf_threshold=args.conf,
+                iou_threshold=args.iou,
+            )
+            infer_ms = (time.perf_counter() - t0) * 1000.0
 
-        faces = face_model.crop(frame, boxes)
-        for (x1, y1, x2, y2, conf, face) in faces:
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            cv2.putText(frame, f"{conf:.2f}", (x1, y1 - 5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-            cv2.imshow("face_crop", face)
-        frame = cv2.resize(frame, (224, 224))
-        cv2.imshow("face_emotion", frame)
+        faces = face_model.crop(frame, boxes, pad=args.pad, extra_ratio=args.extra_ratio)
+        if not args.no_show:
+            cv2.putText(frame, f"FPS: {fps:.1f}", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
-        if cv2.waitKey(1) & 0xFF == 27:
-            break
+            for (x1, y1, x2, y2, conf, face) in faces:
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(frame, f"{conf:.2f}", (x1, y1 - 5),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                cv2.imshow("face_crop", face)
+
+            frame_show = cv2.resize(frame, (224, 224))
+            cv2.imshow("face_emotion", frame_show)
+            if cv2.waitKey(1) & 0xFF in (27, ord("q")):
+                break
 
     cap.release()
     cv2.destroyAllWindows()
