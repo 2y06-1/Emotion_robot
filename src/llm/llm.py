@@ -1,49 +1,77 @@
-import requests
 import json
 from pathlib import Path
-import os
 
-current_dir = Path(__file__).resolve().parent
-base_url = "http://localhost:11434"
-model_name = "my_test:latest"
-txt_path = current_dir.parent.parent/"model"/"llm"/"chat_history.txt"
+import requests
+
 
 class Ollama_chat:
-    def __init__(self, base_url, model_name, txt_path):
-        self.base_url = base_url
-        self.model_name = model_name
-        self.txt_path = txt_path
-        self.api_url = f"{base_url}/api/chat"
+    """Ollama 对话模块。
+
+    接口原则：
+    - 本文件不读取 config.json。
+    - 本文件不写死 base_url、model_name、chat_history 路径。
+    - 所有配置由 main.py 从 config.py 获取后传入。
+    """
+
+    def __init__(self, base_url, model_name, txt_path, stream, timeout):
+        self.base_url = str(base_url).rstrip("/")
+        self.model_name = str(model_name)
+        self.txt_path = Path(txt_path)
+        self.stream = bool(stream)
+        self.timeout = None if timeout is None else float(timeout)
+
+        self.api_url = f"{self.base_url}/api/chat"
         self.history = []
+
+        self.txt_path.parent.mkdir(parents=True, exist_ok=True)
+        self.txt_path.touch(exist_ok=True)
 
     def history_append(self, role, content):
         self.history.append({"role": role, "content": content})
-        
-        with open(self.txt_path, "a") as f:
+
+        with open(self.txt_path, "a", encoding="utf-8") as f:
             f.write(f"{role}: {content}\n")
 
     def chat_ollama(self, user_message):
-        self.history_append("user", user_message)  
+        self.history_append("user", user_message)
 
         payload = {
             "model": self.model_name,
             "messages": self.history,
-            "stream": True
+            "stream": self.stream,
         }
 
-        response = requests.post(self.api_url, json=payload, stream=True)
+        response = requests.post(
+            self.api_url,
+            json=payload,
+            stream=self.stream,
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+
         print(f"{self.model_name} > ", end="", flush=True)
+
+        if not self.stream:
+            data = response.json()
+            reply = data.get("message", {}).get("content", "")
+            reply = self._remove_think_content(reply)
+            print(reply, flush=True)
+            self.history_append("assistant", reply)
+            return reply
+
         full_reply = ""
         in_think = False
         buffer = ""
 
         for line in response.iter_lines():
-            if line:
-                chunk = json.loads(line.decode('utf-8'))
-                content = chunk.get("message", {}).get("content", "")
-                if not content:
-                    continue
+            if not line:
+                continue
+
+            chunk = json.loads(line.decode("utf-8"))
+            content = chunk.get("message", {}).get("content", "")
+            if content:
                 buffer += content
+
                 if not in_think:
                     think_start = buffer.find("<think>")
                     if think_start != -1:
@@ -52,7 +80,7 @@ class Ollama_chat:
                             print(part, end="", flush=True)
                             full_reply += part
                         in_think = True
-                        buffer = buffer[think_start + 7:] 
+                        buffer = buffer[think_start + len("<think>"):]
                     else:
                         print(buffer, end="", flush=True)
                         full_reply += buffer
@@ -60,7 +88,7 @@ class Ollama_chat:
                 else:
                     think_end = buffer.find("</think>")
                     if think_end != -1:
-                        part = buffer[think_end + 8:]  
+                        part = buffer[think_end + len("</think>"):]
                         if part:
                             print(part, end="", flush=True)
                             full_reply += part
@@ -69,36 +97,29 @@ class Ollama_chat:
                     else:
                         buffer = ""
 
-                if chunk.get("done"):
-                    break
+            if chunk.get("done"):
+                break
 
-        print()
+        print(flush=True)
         self.history_append("assistant", full_reply)
-        return full_reply 
+        return full_reply
 
     def history_clear(self):
         self.history = []
-        with open(self.txt_path, "w") as f:  
+        with open(self.txt_path, "w", encoding="utf-8") as f:
             f.truncate(0)
-        print("对话历史已清空")
+        print("对话历史已清空", flush=True)
 
     def history_show(self):
         for msg in self.history:
-            print(f"{msg['role']}: {msg['content'][:100]}...")
+            print(f"{msg['role']}: {msg['content'][:100]}...", flush=True)
 
-if __name__ == "__main__":
-    bot = Ollama_chat(base_url, model_name, txt_path)
-    print("情感陪伴机器人已启动），输入 quit 退出,clear 清空历史,show 展示历史s\n")
-
-    while True:
-        user_input = input("你: ")
-        if user_input.lower() == "quit":
-            print("quit")
-            break
-        elif user_input.lower() == "clear":
-            bot.history_clear()  
-            continue
-        elif user_input.lower() == "show":
-            bot.history_show()  
-            continue
-        full_reply=bot.chat_ollama(user_input)  
+    @staticmethod
+    def _remove_think_content(text):
+        while True:
+            start = text.find("<think>")
+            end = text.find("</think>")
+            if start == -1 or end == -1 or end < start:
+                break
+            text = text[:start] + text[end + len("</think>"):]
+        return text

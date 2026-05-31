@@ -3,46 +3,63 @@ import re
 import time
 import tempfile
 import subprocess
+from pathlib import Path
 
 import sherpa_onnx
 import soundfile as sf
 
 
 class Text_Tranform:
-    def __init__(self):
+    """
+    TTS 文本转语音模块。
+
+    接口原则：
+    - 本文件不读取 config.json。
+    - 本文件不读取环境变量。
+    - 本文件不写死模型目录、播放设备、线程数、音色等配置。
+    - 所有配置由 main.py 从 config.py 读取后传入。
+    """
+
+    def __init__(
+        self,
+        model_dir,
+        provider,
+        num_threads,
+        sid,
+        speed,
+        silence_scale,
+        aplay_device,
+        max_chars,
+        warmup,
+        max_num_sentences,
+    ):
         print("加载 TTS 模型...", flush=True)
         total_start = time.time()
 
-        # 你当前测试成功的新模型目录
-        self.model_dir = os.getenv(
-            "TTS_MODEL_DIR",
-            "/home/bianbu/Emotion_robot/model/asr"
-        )
+        self.model_dir = Path(model_dir)
+        self.provider = provider
+        self.num_threads = int(num_threads)
+        self.sid = int(sid)
+        self.speed = float(speed)
+        self.silence_scale = float(silence_scale)
+        self.aplay_device = str(aplay_device)
+        self.max_chars = int(max_chars)
+        self.warmup = bool(warmup)
+        self.max_num_sentences = int(max_num_sentences)
 
-        self.model_path = os.path.join(self.model_dir, "model.onnx")
-        self.tokens_path = os.path.join(self.model_dir, "tokens.txt")
-        self.lexicon_path = os.path.join(self.model_dir, "lexicon.txt")
+        self.model_path = self.model_dir / "model.onnx"
+        self.tokens_path = self.model_dir / "tokens.txt"
+        self.lexicon_path = self.model_dir / "lexicon.txt"
+
+        self.phone_fst_path = self.model_dir / "phone.fst"
+        self.date_fst_path = self.model_dir / "date.fst"
+        self.number_fst_path = self.model_dir / "number.fst"
 
         self.rule_fsts = ",".join([
-            os.path.join(self.model_dir, "phone.fst"),
-            os.path.join(self.model_dir, "date.fst"),
-            os.path.join(self.model_dir, "number.fst"),
+            str(self.phone_fst_path),
+            str(self.date_fst_path),
+            str(self.number_fst_path),
         ])
-
-        # 稳定演示版：CPU + 4 线程
-        self.provider = os.getenv("TTS_PROVIDER", "cpu")
-        self.num_threads = int(os.getenv("TTS_NUM_THREADS", "4"))
-
-        # aishell3 是多说话人模型，sid=66 是你目前测试用的音色
-        self.sid = int(os.getenv("TTS_SID", "55"))
-        self.speed = float(os.getenv("TTS_SPEED", "1.5"))
-        self.silence_scale = float(os.getenv("TTS_SILENCE_SCALE", "0.2"))
-
-        # 音频设备。如果播放失败，可以运行前改成 APLAY_DEVICE=default
-        self.aplay_device = os.getenv("APLAY_DEVICE", "plughw:2,0")
-
-        # 限制 TTS 文本长度，避免大模型回复太长导致等待时间过久
-        self.max_chars = int(os.getenv("TTS_MAX_CHARS", "100"))
 
         self._check_files()
 
@@ -58,9 +75,9 @@ class Text_Tranform:
         tts_config = sherpa_onnx.OfflineTtsConfig(
             model=sherpa_onnx.OfflineTtsModelConfig(
                 vits=sherpa_onnx.OfflineTtsVitsModelConfig(
-                    model=self.model_path,
-                    tokens=self.tokens_path,
-                    lexicon=self.lexicon_path,
+                    model=str(self.model_path),
+                    tokens=str(self.tokens_path),
+                    lexicon=str(self.lexicon_path),
                 ),
                 provider=self.provider,
                 num_threads=self.num_threads,
@@ -68,7 +85,7 @@ class Text_Tranform:
             ),
             rule_fsts=self.rule_fsts,
             rule_fars="",
-            max_num_sentences=1,
+            max_num_sentences=self.max_num_sentences,
         )
 
         load_start = time.time()
@@ -82,8 +99,7 @@ class Text_Tranform:
         self.gen_config.speed = self.speed
         self.gen_config.silence_scale = self.silence_scale
 
-        # 预热一次，避免第一次真正说话时额外变慢
-        if os.getenv("TTS_WARMUP", "1") == "1":
+        if self.warmup:
             try:
                 print("[TTS] warmup...", flush=True)
                 self.tts.generate("你好", self.gen_config)
@@ -99,28 +115,27 @@ class Text_Tranform:
             self.model_path,
             self.tokens_path,
             self.lexicon_path,
-            os.path.join(self.model_dir, "phone.fst"),
-            os.path.join(self.model_dir, "date.fst"),
-            os.path.join(self.model_dir, "number.fst"),
+            self.phone_fst_path,
+            self.date_fst_path,
+            self.number_fst_path,
         ]
 
         for path in required_files:
-            if not os.path.exists(path):
+            if not path.exists():
                 raise FileNotFoundError(f"缺失文件: {path}")
 
     def _clean_text(self, text: str) -> str:
-        text = text.strip()
+        text = str(text).strip()
 
-        # ★ 强制逗号 → 句号（产生明显停顿）
-        text = text.replace('，', '。').replace(',', '。')
+        # 逗号转句号，增加明显停顿。
+        text = text.replace("，", "。").replace(",", "。")
 
-        # 以下原有的清理逻辑保持不变
-        text = re.sub(r"", "", text, flags=re.S)
+        # 清理常见 Markdown / HTML 符号。
         text = re.sub(r"<.*?>", "", text)
         text = re.sub(r"[#>*`_\[\]{}]", "", text)
         text = re.sub(r"\s+", " ", text).strip()
 
-        if self.max_chars and len(text) > self.max_chars:
+        if self.max_chars > 0 and len(text) > self.max_chars:
             text = text[:self.max_chars]
 
         return text
@@ -153,7 +168,7 @@ class Text_Tranform:
         with tempfile.NamedTemporaryFile(
             suffix=".wav",
             delete=False,
-            dir=tmp_dir
+            dir=tmp_dir,
         ) as f:
             temp_path = f.name
 
@@ -162,7 +177,6 @@ class Text_Tranform:
 
             play_start = time.time()
 
-            # 优先使用指定设备播放
             try:
                 subprocess.run(
                     ["aplay", "-q", "-D", self.aplay_device, temp_path],
@@ -171,7 +185,6 @@ class Text_Tranform:
                     stderr=subprocess.PIPE,
                 )
             except subprocess.CalledProcessError:
-                # 如果 plughw:0,0 播放失败，自动回退 default
                 subprocess.run(
                     ["aplay", "-q", "-D", "default", temp_path],
                     check=True,
@@ -203,26 +216,3 @@ class Text_Tranform:
         except Exception as e:
             print(f"[TTS] 错误: {e}", flush=True)
             return False
-
-
-def main():
-    tts = Text_Tranform()
-
-    while True:
-        try:
-            text = input("请输入文本: ")
-        except EOFError:
-            break
-        except KeyboardInterrupt:
-            print("\n已退出。")
-            break
-
-        if text.strip().lower() in ["q", "quit", "exit"]:
-            print("已退出。")
-            break
-
-        tts.text_to_speech(text)
-
-
-if __name__ == "__main__":
-    main()
