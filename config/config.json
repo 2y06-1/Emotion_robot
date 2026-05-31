@@ -1,0 +1,99 @@
+{
+  "project": {
+    "root": "/home/bianbu/Emotion_robot",
+    "python_paths": [
+      "src",
+      "src/asr",
+      "src/llm",
+      "src/ui",
+      "src/vision"
+    ]
+  },
+  "audio": {
+    "voice_path": "/tmp/emotion_robot_wav",
+    "device_id": 2,
+    "max_keep_files": 4,
+    "voice_threshold": 600,
+    "min_voice_sec": 2,
+    "channels": 1,
+    "chunk_size": 1024,
+    "dtype": "int16",
+    "record_max_duration": 60,
+    "aplay_device": "plughw:2,0",
+    "init_wav": "wav/init.wav",
+    "emotion_wav_dir": "wav"
+  },
+  "asr": {
+    "project_root": "/home/bianbu/asr-llm-tts/asr-llm-tts/src"
+  },
+  "llm": {
+    "base_url": "http://localhost:11434",
+    "model_name": "my_test:latest",
+    "chat_history": "model/llm/chat_history.txt",
+    "stream": true,
+    "timeout": null
+  },
+  "tts": {
+    "venv_python": "/home/bianbu/Emotion_robot/venv_tts/bin/python",
+    "worker_path": "src/asr/tts_worker.py",
+    "model_dir": "model/asr",
+    "provider": "cpu",
+    "threads": 4,
+    "sid": 55,
+    "speed": 1.5,
+    "silence_scale": 0.2,
+    "max_chars": 100,
+    "warmup": true,
+    "max_num_sentences": 1
+  },
+  "vision": {
+    "camera_device": "/dev/video20",
+    "camera_fallback": 0,
+    "mirror_camera": true,
+    "idle_sleep": 0.03,
+    "face_model_path": "model/vision/best.onnx",
+    "face_provider": "auto",
+    "face_threads": 4,
+    "face_img_size": 224,
+    "face_conf": 0.5,
+    "face_iou": 0.4,
+    "face_pad": 20,
+    "face_extra_ratio": 0.25,
+    "face_detect_every": 3,
+    "emotion_model_path": "model/vision/emotion_best_uint8_static.onnx",
+    "emotion_provider": "cpu",
+    "emotion_threads": 4,
+    "emotion_img_size": 64,
+    "emotion_top_k": 1,
+    "emotion_class_names": [
+      "angry",
+      "happy",
+      "neutral",
+      "sad",
+      "surprise"
+    ],
+    "emotion_mean": [
+      0.485,
+      0.456,
+      0.406
+    ],
+    "emotion_std": [
+      0.229,
+      0.224,
+      0.225
+    ],
+    "emotion_infer_interval": 0.1,
+    "emotion_smooth_window": 8,
+    "emotion_min_accept_conf": 0.45,
+    "emotion_min_vote_frames": 4,
+    "strong_emotion_conf": 0.7,
+    "strong_emotion_cooldown": 5.0
+  },
+  "chat": {
+    "min_text_len": 2,
+    "valid_chinese_ratio": 0.3
+  },
+  "ui": {
+    "fullscreen": true
+  }
+}
