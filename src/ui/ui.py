@@ -140,18 +140,20 @@ class RobotEyesWidget(QWidget):
         painter.restore()
 
     def _draw_smile_eye(self, painter, x, y, ew, eh):
+        """开心眼：像笑起来的上扬弧线。"""
         core, mid, outer = self._eye_colors(False)
         painter.save()
-        # 弧线外发光。
         for width, alpha in [(20, 22), (14, 38), (9, 220)]:
             pen = QPen(QColor(core.red(), core.green(), core.blue(), alpha), width, Qt.SolidLine, Qt.RoundCap)
             painter.setPen(pen)
             painter.setBrush(Qt.NoBrush)
             rect = QRectF(x - ew / 2, y - eh / 2, ew, eh)
-            painter.drawArc(rect, 205 * 16, 130 * 16)
+            # Qt 坐标系 y 轴向下：25°~155° 这段在椭圆上半部分，显示为笑眼。
+            painter.drawArc(rect, 25 * 16, 130 * 16)
         painter.restore()
 
     def _draw_sad_eye(self, painter, x, y, ew, eh):
+        """伤心眼：像哭脸的下垂弧线。"""
         core, mid, outer = self._eye_colors(False)
         painter.save()
         for width, alpha in [(20, 20), (14, 36), (9, 215)]:
@@ -159,7 +161,8 @@ class RobotEyesWidget(QWidget):
             painter.setPen(pen)
             painter.setBrush(Qt.NoBrush)
             rect = QRectF(x - ew / 2, y - eh / 2, ew, eh)
-            painter.drawArc(rect, 25 * 16, 130 * 16)
+            # 205°~335° 这段在椭圆下半部分，显示为伤心/哭脸眼。
+            painter.drawArc(rect, 205 * 16, 130 * 16)
         painter.restore()
 
 

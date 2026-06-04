@@ -1,4 +1,5 @@
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -11,10 +12,6 @@ import cv2
 from PyQt5.QtCore import QObject, pyqtSignal
 from PyQt5.QtWidgets import QApplication, QMessageBox
 
-# 当前目录结构：
-# Emotion_robot/
-# ├── config/config.py
-# └── src/main.py
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_DIR = PROJECT_ROOT / "config"
 if str(CONFIG_DIR) not in sys.path:
@@ -22,7 +19,6 @@ if str(CONFIG_DIR) not in sys.path:
 
 from config import cfg
 
-# 先把模块目录加入 sys.path，再导入各功能模块。
 for path in cfg.PYTHON_PATHS:
     path_str = str(path)
     if path_str not in sys.path:
@@ -34,6 +30,11 @@ from voice_tranform import Voice_Transform
 from llm import Ollama_chat
 from face_detect import Face_Detect
 from emotion_detect import EmotionClassifier
+
+
+def cfg_get(name, default=None):
+    """兼容旧版 config.py：config.json 里新加字段没有映射时，使用默认值。"""
+    return getattr(cfg, name, default)
 
 
 class EmotionRobot(QObject):
@@ -113,6 +114,9 @@ class EmotionRobot(QObject):
         self.last_emotion_infer_time = 0.0
         self.last_emotion = "no_face"
         self.last_emotion_prob = 0.0
+        # 终端只在表情变化时打印一次，避免刷屏。
+        self._last_print_emotion = None
+        self.no_face_count = 0
 
         # ===== 连接 UI 信号 =====
         self.ui_clear_chat.connect(self._on_ui_clear_chat)
@@ -148,6 +152,105 @@ class EmotionRobot(QObject):
         self._play_init_sound()
 
     # ---------- 初始化 ----------
+    def _try_set_cap(self, cap, prop, value, name):
+        """设置摄像头属性。有些摄像头不支持，失败不影响程序继续运行。"""
+        if value is None:
+            return
+        try:
+            cap.set(prop, value)
+        except Exception:
+            pass
+
+    def _apply_camera_settings(self, cap):
+        """解决摄像头画面暗、延迟高：设置分辨率、MJPG、FPS、曝光、增益、亮度。"""
+        if cap is None:
+            return
+
+        fourcc = str(cfg_get("CAMERA_FOURCC", "MJPG"))
+        if fourcc:
+            try:
+                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc[:4]))
+            except Exception:
+                pass
+
+        self._try_set_cap(cap, cv2.CAP_PROP_FRAME_WIDTH, cfg_get("CAMERA_WIDTH", 640), "WIDTH")
+        self._try_set_cap(cap, cv2.CAP_PROP_FRAME_HEIGHT, cfg_get("CAMERA_HEIGHT", 480), "HEIGHT")
+        self._try_set_cap(cap, cv2.CAP_PROP_FPS, cfg_get("CAMERA_FPS", 30), "FPS")
+        self._try_set_cap(cap, cv2.CAP_PROP_BUFFERSIZE, 1, "BUFFERSIZE")
+
+        # Linux V4L2 下常见：0.25=手动曝光，0.75=自动曝光。
+        auto_exp = bool(cfg_get("CAMERA_AUTO_EXPOSURE", True))
+        self._try_set_cap(cap, cv2.CAP_PROP_AUTO_EXPOSURE, 0.75 if auto_exp else 0.25, "AUTO_EXPOSURE")
+        if not auto_exp:
+            self._try_set_cap(cap, cv2.CAP_PROP_EXPOSURE, cfg_get("CAMERA_EXPOSURE", -4), "EXPOSURE")
+
+        self._try_set_cap(cap, cv2.CAP_PROP_GAIN, cfg_get("CAMERA_GAIN", 80), "GAIN")
+        self._try_set_cap(cap, cv2.CAP_PROP_BRIGHTNESS, cfg_get("CAMERA_BRIGHTNESS", 150), "BRIGHTNESS")
+        self._try_set_cap(cap, cv2.CAP_PROP_CONTRAST, cfg_get("CAMERA_CONTRAST", 128), "CONTRAST")
+
+        # 丢弃前几帧，让自动曝光稳定下来。
+        warmup = int(cfg_get("CAMERA_WARMUP_FRAMES", 10))
+        for _ in range(max(0, warmup)):
+            cap.read()
+
+
+    def _open_camera_by_device(self, device):
+        """更稳的摄像头打开方式：/dev/video20 失败时会再尝试索引 20。"""
+        cap = cv2.VideoCapture(device, cv2.CAP_V4L2)
+        if cap.isOpened():
+            self._apply_camera_settings(cap)
+            return cap
+
+        try:
+            cap.release()
+        except Exception:
+            pass
+
+        if isinstance(device, str):
+            match = re.search(r"/dev/video(\d+)$", device)
+            if match:
+                index = int(match.group(1))
+                cap = cv2.VideoCapture(index, cv2.CAP_V4L2)
+                if cap.isOpened():
+                    self._apply_camera_settings(cap)
+                    return cap
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+
+        return None
+
+    def _save_debug_images(self, display_frame, face_img, face_for_model, emotion, prob, topk_text):
+        """保存调试图片：原始画面、人脸裁剪、人脸增强后图像。"""
+        if not cfg_get("EMOTION_SAVE_DEBUG", True):
+            return
+
+        now = time.time()
+        if now - self.last_debug_save_time < float(cfg_get("EMOTION_DEBUG_INTERVAL", 1.0)):
+            return
+        self.last_debug_save_time = now
+
+        try:
+            debug_dir = Path(str(cfg_get("EMOTION_DEBUG_DIR", "/tmp/emotion_debug")))
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            ts = time.strftime("%Y%m%d_%H%M%S")
+            ms = int((now - int(now)) * 1000)
+            prefix = debug_dir / f"{ts}_{ms:03d}_{emotion}_{prob:.2f}"
+
+            cv2.imwrite(str(prefix) + "_frame.jpg", display_frame)
+            cv2.imwrite(str(prefix) + "_face_raw.jpg", face_img)
+            cv2.imwrite(str(prefix) + "_face_model.jpg", face_for_model)
+
+            info_path = str(prefix) + "_info.txt"
+            with open(info_path, "w", encoding="utf-8") as f:
+                f.write(topk_text + "\n")
+                f.write(f"raw_face_gray_mean={self.emotion_cls.gray_mean(face_img):.2f}\n")
+                f.write(f"model_face_gray_mean={self.emotion_cls.gray_mean(face_for_model):.2f}\n")
+            print(f"[emotion debug] 已保存: {prefix}_*.jpg", flush=True)
+        except Exception as e:
+            print(f"[emotion debug] 保存失败: {e}", flush=True)
+
     def _init_vision_modules(self):
         try:
             self.face_detector = Face_Detect(
@@ -165,16 +268,22 @@ class EmotionRobot(QObject):
                 class_names=cfg.EMOTION_CLASS_NAMES,
                 mean=cfg.EMOTION_MEAN,
                 std=cfg.EMOTION_STD,
+                auto_enhance=cfg_get("EMOTION_AUTO_ENHANCE", True),
+                enhance_dark_threshold=cfg_get("EMOTION_ENHANCE_DARK_THRESHOLD", 70),
+                gamma=cfg_get("EMOTION_GAMMA", 1.6),
             )
 
-            self.cap = cv2.VideoCapture(cfg.CAMERA_DEVICE, cv2.CAP_V4L2)
-            if not self.cap.isOpened():
+            self.cap = self._open_camera_by_device(cfg.CAMERA_DEVICE)
+            if self.cap is None:
                 print(f"[视觉] 摄像头打开失败: {cfg.CAMERA_DEVICE}，尝试备用设备: {cfg.CAMERA_FALLBACK}", flush=True)
-                self.cap = cv2.VideoCapture(cfg.CAMERA_FALLBACK)
+                self.cap = self._open_camera_by_device(cfg.CAMERA_FALLBACK)
 
-            if not self.cap.isOpened():
+            if self.cap is None or not self.cap.isOpened():
                 print("[视觉] 备用摄像头也打开失败", flush=True)
                 self.cap = None
+            else:
+                # 摄像头参数已经在 _apply_camera_settings() 中设置。
+                pass
 
         except Exception as e:
             print(f"[视觉] 初始化失败: {e}", flush=True)
@@ -196,18 +305,52 @@ class EmotionRobot(QObject):
         self.last_emotion = "no_face"
         self.last_emotion_prob = 0.0
 
-    def _smooth_emotion(self, emotion, prob):
-        if prob >= cfg.EMOTION_MIN_ACCEPT_CONF:
-            self.emotion_window.append(emotion)
+    def _smooth_emotion(self, raw_emotion, prob):
+        """64×64 专用平滑：neutral 更难进入投票，非 neutral 更容易被保留。"""
+        emotion_accept_conf = cfg_get("EMOTION_MIN_ACCEPT_CONF", 0.25)
+        neutral_accept_conf = cfg_get("NEUTRAL_MIN_ACCEPT_CONF", 0.55)
+        emotion_min_vote_frames = cfg_get("EMOTION_MIN_VOTE_FRAMES", 2)
+        neutral_min_vote_frames = cfg_get("NEUTRAL_MIN_VOTE_FRAMES", 3)
 
-        if len(self.emotion_window) >= cfg.EMOTION_MIN_VOTE_FRAMES:
-            smooth_emotion = Counter(self.emotion_window).most_common(1)[0][0]
+        if raw_emotion == "neutral":
+            if prob >= neutral_accept_conf:
+                self.emotion_window.append(raw_emotion)
         else:
-            smooth_emotion = emotion
+            if prob >= emotion_accept_conf:
+                self.emotion_window.append(raw_emotion)
+
+        if not self.emotion_window:
+            smooth_emotion = self.last_emotion if self.last_emotion != "no_face" else raw_emotion
+        else:
+            counter = Counter(self.emotion_window)
+            vote_emotion, vote_count = counter.most_common(1)[0]
+
+            if vote_emotion == "neutral":
+                if vote_count >= neutral_min_vote_frames:
+                    smooth_emotion = "neutral"
+                else:
+                    smooth_emotion = self.last_emotion if self.last_emotion != "no_face" else raw_emotion
+            else:
+                if vote_count >= emotion_min_vote_frames:
+                    smooth_emotion = vote_emotion
+                else:
+                    smooth_emotion = self.last_emotion if self.last_emotion != "no_face" else raw_emotion
 
         self.last_emotion = smooth_emotion
         self.last_emotion_prob = prob
         return smooth_emotion, prob
+
+    def _handle_no_face(self, display_frame):
+        self.no_face_count += 1
+        no_face_reset_frames = cfg_get("NO_FACE_RESET_FRAMES", 5)
+        if self.no_face_count >= no_face_reset_frames:
+            self._reset_emotion_smooth()
+            self.ui_set_emotion.emit("no_face", "", False)
+            self.ui_set_user_face.emit(display_frame, "no_face", 0.0)
+        else:
+            # 短暂丢脸时不马上清空表情，减少 UI 闪烁。
+            self.ui_set_emotion.emit(self.last_emotion, f"置信度 {self.last_emotion_prob:.2f}", False)
+            self.ui_set_user_face.emit(display_frame, self.last_emotion, self.last_emotion_prob)
 
     def _draw_face_boxes(self, display_frame, boxes):
         for (x1, y1, x2, y2, conf) in boxes:
@@ -258,57 +401,65 @@ class EmotionRobot(QObject):
                     )
 
                 boxes = self.last_face_boxes or []
-                if boxes:
-                    self._draw_face_boxes(display_frame, boxes)
-                    faces = self.face_detector.crop(
-                        frame,
-                        boxes,
-                        pad=cfg.FACE_PAD,
-                        extra_ratio=cfg.FACE_EXTRA_RATIO,
-                    )
-                    main_face = self._select_main_face(faces)
-                    if main_face is not None:
-                        _, _, _, _, _, face_img = main_face
+                if not boxes:
+                    self._handle_no_face(display_frame)
+                    time.sleep(cfg.VISION_IDLE_SLEEP)
+                    continue
 
-                        now = time.time()
-                        if now - self.last_emotion_infer_time >= cfg.EMOTION_INFER_INTERVAL:
-                            self.last_emotion_infer_time = now
-                            emotion, prob = self.emotion_cls.predict(face_img)
-                            emotion, prob = self._smooth_emotion(emotion, prob)
-                        else:
-                            emotion = self.last_emotion
-                            prob = self.last_emotion_prob
+                self.no_face_count = 0
+                self._draw_face_boxes(display_frame, boxes)
+                faces = self.face_detector.crop(
+                    frame,
+                    boxes,
+                    pad=cfg.FACE_PAD,
+                    extra_ratio=cfg.FACE_EXTRA_RATIO,
+                )
+                main_face = self._select_main_face(faces)
+                if main_face is None:
+                    self._handle_no_face(display_frame)
+                    time.sleep(cfg.VISION_IDLE_SLEEP)
+                    continue
 
-                        strong = emotion != "neutral" and prob >= cfg.STRONG_EMOTION_CONF
-                        self.ui_set_emotion.emit(emotion, f"置信度 {prob:.2f}", strong)
-                        self.ui_set_user_face.emit(display_frame, emotion, prob)
+                _, _, _, _, _, face_img = main_face
 
-                        if strong and self.current_mode == "emotion" and self.ui.current_page == "robot":
-                            now = time.time()
-                            if now - self.last_strong_emotion_time > cfg.STRONG_EMOTION_COOLDOWN:
-                                self.last_strong_emotion_time = now
-                                self.pending_strong_emotion = emotion.capitalize()
-                                cn_emotion = {
-                                    "angry": "生气",
-                                    "happy": "开心",
-                                    "neutral": "平静",
-                                    "sad": "难过",
-                                    "surprise": "惊讶",
-                                    "fear": "害怕",
-                                    "disgust": "厌恶",
-                                }.get(emotion, emotion)
-                                ask_text = f"检测到您似乎{cn_emotion}，愿意和我聊聊吗？"
-                                print(ask_text, flush=True)
-                                self.ui_append_system.emit(ask_text)
-                                self._play_emotion_wav(emotion)
-                    else:
-                        self._reset_emotion_smooth()
-                        self.ui_set_emotion.emit("no_face", "", False)
-                        self.ui_set_user_face.emit(display_frame, "no_face", 0.0)
+                now = time.time()
+                if now - self.last_emotion_infer_time >= cfg.EMOTION_INFER_INTERVAL:
+                    self.last_emotion_infer_time = now
+
+                    raw_emotion, prob = self.emotion_cls.predict(face_img)
+
+                    emotion, prob = self._smooth_emotion(raw_emotion, prob)
+                    if emotion != self._last_print_emotion:
+                        print(f"[当前表情] {emotion} ({prob:.2f})", flush=True)
+                        self._last_print_emotion = emotion
+
+                    ui_tip = f"置信度 {prob:.2f}"
                 else:
-                    self._reset_emotion_smooth()
-                    self.ui_set_emotion.emit("no_face", "", False)
-                    self.ui_set_user_face.emit(display_frame, "no_face", 0.0)
+                    emotion = self.last_emotion
+                    prob = self.last_emotion_prob
+                    ui_tip = f"置信度 {prob:.2f}"
+
+                strong = emotion != "neutral" and emotion != "no_face" and prob >= cfg.STRONG_EMOTION_CONF
+                self.ui_set_emotion.emit(emotion, ui_tip, strong)
+                self.ui_set_user_face.emit(display_frame, emotion, prob)
+
+                if strong and self.current_mode == "emotion" and self.ui.current_page == "robot":
+                    now = time.time()
+                    if now - self.last_strong_emotion_time > cfg.STRONG_EMOTION_COOLDOWN:
+                        self.last_strong_emotion_time = now
+                        self.pending_strong_emotion = emotion.capitalize()
+                        cn_emotion = {
+                            "angry": "生气",
+                            "happy": "开心",
+                            "neutral": "平静",
+                            "sad": "难过",
+                            "surprise": "惊讶",
+                            "fear": "害怕",
+                            "disgust": "厌恶",
+                        }.get(emotion, emotion)
+                        ask_text = f"检测到您似乎{cn_emotion}，愿意和我聊聊吗？"
+                        self.ui_append_system.emit(ask_text)
+                        self._play_emotion_wav(emotion)
 
             except Exception as e:
                 print(f"[视觉] 单帧处理失败: {e}", flush=True)
@@ -326,15 +477,12 @@ class EmotionRobot(QObject):
         self.vision_pause.clear()
         self.vision_thread = threading.Thread(target=self._vision_loop, daemon=True)
         self.vision_thread.start()
-        print("[视觉] 线程已启动", flush=True)
 
     def _pause_vision(self):
         self.vision_pause.set()
-        print("[视觉] 已暂停", flush=True)
 
     def _resume_vision(self):
         self.vision_pause.clear()
-        print("[视觉] 已恢复", flush=True)
 
     def _stop_vision(self):
         self.vision_running = False
@@ -343,7 +491,6 @@ class EmotionRobot(QObject):
             self.vision_thread.join(timeout=2)
         if self.cap and self.cap.isOpened():
             self.cap.release()
-        print("[视觉] 线程已停止", flush=True)
 
     # ---------- TTS 子进程管理 ----------
     def _start_tts_process(self):
@@ -372,7 +519,6 @@ class EmotionRobot(QObject):
             )
             startup = self.tts_proc.stdout.readline()
             print(f"[TTS] {startup.strip()}", flush=True)
-            print("[Main] TTS 子进程已启动", flush=True)
         except Exception as e:
             print(f"[Main] 无法启动 TTS 子进程: {e}", flush=True)
             self.tts_proc = None
@@ -437,7 +583,6 @@ class EmotionRobot(QObject):
                 if not line:
                     break
                 line = line.strip()
-                print(line, flush=True)
                 if line == "TTS_DONE":
                     break
         except Exception as e:
@@ -621,7 +766,6 @@ class EmotionRobot(QObject):
             try:
                 reply = self.llm_bot.chat_ollama(message).strip()
                 if self._is_task_cancelled(task_id):
-                    print("[LLM] 本轮聊天已结束，丢弃旧回复", flush=True)
                     return
                 if not reply:
                     reply = "我好像没听清，可以再说一遍吗？"
@@ -631,7 +775,6 @@ class EmotionRobot(QObject):
                 reply = "抱歉，我现在脑子有点乱，请稍后再试。"
                 print(f"[LLM 错误] {e}", flush=True)
 
-            print(f"[AI 回复] {reply}", flush=True)
             if self._is_task_cancelled(task_id):
                 return
             self.ui_append_ai.emit(reply)
@@ -662,7 +805,6 @@ class EmotionRobot(QObject):
                 stderr=subprocess.PIPE,
             )
 
-    # ---------- 辅助 ----------
     def _is_valid_chinese(self, text):
         chinese_count = sum(1 for c in text if "\u4e00" <= c <= "\u9fff")
         return len(text) > 0 and chinese_count / len(text) >= cfg.VALID_CHINESE_RATIO

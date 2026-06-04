@@ -43,9 +43,6 @@ class Face_Detect:
                 session_options,
                 providers=providers,
             )
-            print(f"load face_model success: {self.model_path}", flush=True)
-            print(f"using providers: {self.face_model.get_providers()}", flush=True)
-
         except Exception as e:
             print(f"加载模型失败: {e}", flush=True)
             self.face_model = None
