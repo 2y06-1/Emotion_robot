@@ -14,6 +14,10 @@ from PyQt5.QtWidgets import QApplication, QMessageBox
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_DIR = PROJECT_ROOT / "config"
+
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 if str(CONFIG_DIR) not in sys.path:
     sys.path.insert(0, str(CONFIG_DIR))
 
@@ -30,6 +34,11 @@ from voice_tranform import Voice_Transform
 from llm import Ollama_chat
 from face_detect import Face_Detect
 from emotion_detect import EmotionClassifier
+
+# 给微信小程序提供 HTTP / WebSocket 接口
+from server.board_api import run_api_server
+from server.board_ws import run_ws_server
+from server.robot_state import robot_state
 
 
 def cfg_get(name, default=None):
@@ -137,7 +146,10 @@ class EmotionRobot(QObject):
         self.ui.exit_chat_clicked.connect(self.on_exit_chat)
         self.ui.exit_program_clicked.connect(self.on_exit_program)
 
-        # 启动视觉线程和 TTS 子进程
+        # 启动网络接口、视觉线程和 TTS 子进程
+        # HTTP 继续保留用于 Windows 浏览器调试；小程序实时数据走 WebSocket。
+        self._start_api_server()
+        self._start_ws_server()
         self._start_vision()
         self._start_tts_process()
 
@@ -150,6 +162,37 @@ class EmotionRobot(QObject):
             self.ui.show()
 
         self._play_init_sound()
+
+    # ---------- 网络接口 ----------
+    def _start_api_server(self):
+        """启动给微信小程序访问的 HTTP 接口服务。
+
+        HTTP 先保留，方便 Windows 浏览器直接访问 /api/ping、/api/status 做调试。
+        小程序实时刷新主要使用 WebSocket。
+        """
+        t = threading.Thread(
+            target=run_api_server,
+            kwargs={
+                "host": "0.0.0.0",
+                "port": 5000,
+            },
+            daemon=True
+        )
+        t.start()
+        print("[HTTP] 板端接口已启动: http://0.0.0.0:5000", flush=True)
+
+    def _start_ws_server(self):
+        """启动给微信小程序实时推送数据的 WebSocket 服务。"""
+        t = threading.Thread(
+            target=run_ws_server,
+            kwargs={
+                "host": "0.0.0.0",
+                "port": 8765,
+            },
+            daemon=True
+        )
+        t.start()
+        print("[WS] 板端 WebSocket 已启动: ws://0.0.0.0:8765", flush=True)
 
     # ---------- 初始化 ----------
     def _try_set_cap(self, cap, prop, value, name):
@@ -347,10 +390,24 @@ class EmotionRobot(QObject):
             self._reset_emotion_smooth()
             self.ui_set_emotion.emit("no_face", "", False)
             self.ui_set_user_face.emit(display_frame, "no_face", 0.0)
+
+            # 同步给小程序：首页显示未检测到人脸
+            robot_state.update_emotion(
+                emotion="no_face",
+                confidence=0,
+                face_detected=False
+            )
         else:
             # 短暂丢脸时不马上清空表情，减少 UI 闪烁。
             self.ui_set_emotion.emit(self.last_emotion, f"置信度 {self.last_emotion_prob:.2f}", False)
             self.ui_set_user_face.emit(display_frame, self.last_emotion, self.last_emotion_prob)
+
+            # 小程序也保持上一次状态，但标记为暂时未检测到人脸
+            robot_state.update_emotion(
+                emotion=self.last_emotion,
+                confidence=self.last_emotion_prob,
+                face_detected=False
+            )
 
     def _draw_face_boxes(self, display_frame, boxes):
         for (x1, y1, x2, y2, conf) in boxes:
@@ -443,6 +500,13 @@ class EmotionRobot(QObject):
                 self.ui_set_emotion.emit(emotion, ui_tip, strong)
                 self.ui_set_user_face.emit(display_frame, emotion, prob)
 
+                # 同步当前表情给微信小程序
+                robot_state.update_emotion(
+                    emotion=emotion,
+                    confidence=prob,
+                    face_detected=True
+                )
+
                 if strong and self.current_mode == "emotion" and self.ui.current_page == "robot":
                     now = time.time()
                     if now - self.last_strong_emotion_time > cfg.STRONG_EMOTION_COOLDOWN:
@@ -467,6 +531,13 @@ class EmotionRobot(QObject):
                 self._reset_emotion_smooth()
                 self.ui_set_emotion.emit("no_face", "", False)
                 self.ui_set_user_face.emit(display_frame, "no_face", 0.0)
+
+                # 单帧异常时同步给小程序，避免首页一直停在旧状态
+                robot_state.update_emotion(
+                    emotion="no_face",
+                    confidence=0,
+                    face_detected=False
+                )
 
             time.sleep(cfg.VISION_IDLE_SLEEP)
 
@@ -714,6 +785,14 @@ class EmotionRobot(QObject):
             return
 
         print(f"[用户说] {user_text}", flush=True)
+
+        # 同步用户聊天内容给小程序聊天页
+        robot_state.add_chat(
+            role="user",
+            content=user_text,
+            emotion=robot_state.current_emotion
+        )
+
         if len(user_text) < cfg.MIN_TEXT_LEN or not self._is_valid_chinese(user_text):
             self.ui_append_system.emit("未识别到有效文本，请重试")
             self._after_record_reset(task_id)
@@ -777,6 +856,14 @@ class EmotionRobot(QObject):
 
             if self._is_task_cancelled(task_id):
                 return
+
+            # 同步机器人回复给小程序聊天页
+            robot_state.add_chat(
+                role="robot",
+                content=reply,
+                emotion=robot_state.current_emotion
+            )
+
             self.ui_append_ai.emit(reply)
             self.tts_start.emit(reply, task_id)
 
