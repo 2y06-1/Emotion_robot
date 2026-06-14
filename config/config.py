@@ -5,11 +5,6 @@ from pathlib import Path
 class AppConfig:
     """
     配置读取层。
-
-    规则：
-    - config.json 只存配置数据。
-    - config.py 只负责读取 json，并把配置整理成 main.py 好调用的属性。
-    - 功能模块不读取 config.json，也不写死真实路径。
     """
 
     def __init__(self, config_path=None):
@@ -29,19 +24,16 @@ class AppConfig:
         self._load_vision()
         self._load_chat()
         self._load_ui()
+        self._load_server()
 
     @staticmethod
     def _default_config_path():
-        # 当前目录结构：
-        # Emotion_robot/config/config.py
-        # Emotion_robot/config/config.json
         return Path(__file__).resolve().parent / "config.json"
 
     def _resolve_project_root(self):
         value = self.data.get("project", {}).get("root")
         if value:
             return Path(value).expanduser().resolve()
-        # config.json 在 Emotion_robot/config/ 下，项目根目录是它的上一级。
         return self.config_path.resolve().parent.parent
 
     def _path(self, value):
@@ -104,33 +96,62 @@ class AppConfig:
         vision = self.data["vision"]
         self.CAMERA_DEVICE = vision["camera_device"]
         self.CAMERA_FALLBACK = vision.get("camera_fallback")
-        self.MIRROR_CAMERA = bool(vision["mirror_camera"])
-        self.VISION_IDLE_SLEEP = float(vision["idle_sleep"])
+        self.MIRROR_CAMERA = bool(vision.get("mirror_camera", True))
+        self.VISION_IDLE_SLEEP = float(vision.get("idle_sleep", 0.02))
+
+        # 摄像头画面参数：用于解决板子画面偏暗、延迟高的问题
+        self.CAMERA_WIDTH = int(vision.get("camera_width", 640))
+        self.CAMERA_HEIGHT = int(vision.get("camera_height", 480))
+        self.CAMERA_FPS = int(vision.get("camera_fps", 30))
+        self.CAMERA_FOURCC = str(vision.get("camera_fourcc", "MJPG"))
+        self.CAMERA_WARMUP_FRAMES = int(vision.get("camera_warmup_frames", 10))
+        self.CAMERA_AUTO_EXPOSURE = bool(vision.get("camera_auto_exposure", True))
+        self.CAMERA_EXPOSURE = vision.get("camera_exposure", -4)
+        self.CAMERA_GAIN = vision.get("camera_gain", 80)
+        self.CAMERA_BRIGHTNESS = vision.get("camera_brightness", 150)
+        self.CAMERA_CONTRAST = vision.get("camera_contrast", 128)
 
         self.FACE_MODEL_PATH = self._path(vision["face_model_path"])
-        self.FACE_PROVIDER = str(vision["face_provider"])
-        self.FACE_THREADS = int(vision["face_threads"])
-        self.FACE_IMG_SIZE = int(vision["face_img_size"])
-        self.FACE_CONF = float(vision["face_conf"])
-        self.FACE_IOU = float(vision["face_iou"])
-        self.FACE_PAD = int(vision["face_pad"])
-        self.FACE_EXTRA_RATIO = float(vision["face_extra_ratio"])
-        self.FACE_DETECT_EVERY = int(vision["face_detect_every"])
+        self.FACE_PROVIDER = str(vision.get("face_provider", "auto"))
+        self.FACE_THREADS = int(vision.get("face_threads", 4))
+        self.FACE_IMG_SIZE = int(vision.get("face_img_size", 224))
+        self.FACE_CONF = float(vision.get("face_conf", 0.25))
+        self.FACE_IOU = float(vision.get("face_iou", 0.45))
+        self.FACE_PAD = int(vision.get("face_pad", 10))
+        self.FACE_EXTRA_RATIO = float(vision.get("face_extra_ratio", 0.18))
+        self.FACE_DETECT_EVERY = int(vision.get("face_detect_every", 1))
 
         self.EMOTION_MODEL_PATH = self._path(vision["emotion_model_path"])
-        self.EMOTION_PROVIDER = str(vision["emotion_provider"])
-        self.EMOTION_THREADS = int(vision["emotion_threads"])
-        self.EMOTION_IMG_SIZE = int(vision["emotion_img_size"])
-        self.EMOTION_TOP_K = int(vision["emotion_top_k"])
+        self.EMOTION_PROVIDER = str(vision.get("emotion_provider", "cpu"))
+        self.EMOTION_THREADS = int(vision.get("emotion_threads", 4))
+        self.EMOTION_IMG_SIZE = int(vision.get("emotion_img_size", 96))
+        self.EMOTION_TOP_K = int(vision.get("emotion_top_k", 5))
         self.EMOTION_CLASS_NAMES = list(vision["emotion_class_names"])
-        self.EMOTION_MEAN = list(vision["emotion_mean"])
-        self.EMOTION_STD = list(vision["emotion_std"])
-        self.EMOTION_INFER_INTERVAL = float(vision["emotion_infer_interval"])
-        self.EMOTION_SMOOTH_WINDOW = int(vision["emotion_smooth_window"])
-        self.EMOTION_MIN_ACCEPT_CONF = float(vision["emotion_min_accept_conf"])
-        self.EMOTION_MIN_VOTE_FRAMES = int(vision["emotion_min_vote_frames"])
-        self.STRONG_EMOTION_CONF = float(vision["strong_emotion_conf"])
-        self.STRONG_EMOTION_COOLDOWN = float(vision["strong_emotion_cooldown"])
+        self.EMOTION_MEAN = list(vision.get("emotion_mean", [0.485, 0.456, 0.406]))
+        self.EMOTION_STD = list(vision.get("emotion_std", [0.229, 0.224, 0.225]))
+
+        self.EMOTION_INFER_INTERVAL = float(vision.get("emotion_infer_interval", 0.12))
+        self.EMOTION_SMOOTH_WINDOW = int(vision.get("emotion_smooth_window", 5))
+        self.EMOTION_MIN_ACCEPT_CONF = float(vision.get("emotion_min_accept_conf", 0.20))
+        self.NEUTRAL_MIN_ACCEPT_CONF = float(vision.get("neutral_min_accept_conf", 0.70))
+        self.EMOTION_MIN_VOTE_FRAMES = int(vision.get("emotion_min_vote_frames", 5))
+        self.NEUTRAL_MIN_VOTE_FRAMES = int(vision.get("neutral_min_vote_frames", 7))
+        self.EMOTION_MIN_VOTE_RATIO = float(vision.get("emotion_min_vote_ratio", 0.45))
+        self.NEUTRAL_MIN_VOTE_RATIO = float(vision.get("neutral_min_vote_ratio", 0.58))
+        self.EMOTION_SWITCH_FRAMES = int(vision.get("emotion_switch_frames", 3))
+        self.NEUTRAL_SWITCH_FRAMES = int(vision.get("neutral_switch_frames", 5))
+        self.EMOTION_MIN_HOLD_SECONDS = float(vision.get("emotion_min_hold_seconds", 0.9))
+        self.EMOTION_STRONG_SWITCH_CONF = float(vision.get("emotion_strong_switch_conf", 0.78))
+        self.STRONG_EMOTION_CONF = float(vision.get("strong_emotion_conf", 0.58))
+        self.STRONG_EMOTION_COOLDOWN = float(vision.get("strong_emotion_cooldown", 8.0))
+        self.EMOTION_PROMPT_MIN_INTERVAL = float(vision.get("emotion_prompt_min_interval", 2.0))
+        self.NO_FACE_RESET_FRAMES = int(vision.get("no_face_reset_frames", 8))
+        self.EMOTION_SAVE_DEBUG = bool(vision.get("emotion_save_debug", False))
+        self.EMOTION_DEBUG_INTERVAL = float(vision.get("emotion_debug_interval", 1.0))
+        self.EMOTION_DEBUG_DIR = str(vision.get("emotion_debug_dir", "/tmp/emotion_debug"))
+        self.EMOTION_AUTO_ENHANCE = bool(vision.get("emotion_auto_enhance", True))
+        self.EMOTION_ENHANCE_DARK_THRESHOLD = float(vision.get("emotion_enhance_dark_threshold", 70))
+        self.EMOTION_GAMMA = float(vision.get("emotion_gamma", 1.6))
 
     def _load_chat(self):
         chat = self.data["chat"]
@@ -140,6 +161,12 @@ class AppConfig:
     def _load_ui(self):
         ui = self.data.get("ui", {})
         self.UI_FULLSCREEN = bool(ui.get("fullscreen", True))
+
+    def _load_server(self):
+        server = self.data.get("server", {})
+        self.WS_HOST = str(server.get("ws_host", "0.0.0.0"))
+        self.WS_PORT = int(server.get("ws_port", 8765))
+        self.WS_PUSH_INTERVAL = float(server.get("ws_push_interval", 0.5))
 
 
 cfg = AppConfig()
