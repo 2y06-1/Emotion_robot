@@ -38,15 +38,8 @@ def make_onnx_session(model_path: str, provider: str, threads: int) -> ort.Infer
 
 
 class EmotionClassifier:
-    """表情分类模块。
-
-    输入：
-        BGR 图像，通常是人脸检测裁剪出来的 face ROI。
-
-    重点：
-    - YOLO 分类 ONNX 输出可能是 logits，也可能已经是概率。
-      所以这里会自动判断是否需要 softmax，避免重复 softmax。
-    - 支持暗光增强，只对送入情绪模型的人脸 ROI 生效。
+    """
+    表情分类模块。
     """
 
     def __init__(

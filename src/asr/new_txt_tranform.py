@@ -12,12 +12,6 @@ import soundfile as sf
 class Text_Tranform:
     """
     TTS 文本转语音模块。
-
-    接口原则：
-    - 本文件不读取 config.json。
-    - 本文件不读取环境变量。
-    - 本文件不写死模型目录、播放设备、线程数、音色等配置。
-    - 所有配置由 main.py 从 config.py 读取后传入。
     """
 
     def __init__(

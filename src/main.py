@@ -15,6 +15,8 @@ from PyQt5.QtWidgets import QApplication, QMessageBox
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_DIR = PROJECT_ROOT / "config"
 
+# main.py 在 src 目录中，server 目录在项目根目录中。
+# 所以这里同时加入 PROJECT_ROOT 和 CONFIG_DIR，保证能导入 server 与 config。
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -35,8 +37,7 @@ from llm import Ollama_chat
 from face_detect import Face_Detect
 from emotion_detect import EmotionClassifier
 
-# 给微信小程序提供 HTTP / WebSocket 接口
-from server.board_api import run_api_server
+# 给微信小程序提供 WebSocket 实时通信
 from server.board_ws import run_ws_server
 from server.robot_state import robot_state
 
@@ -123,9 +124,19 @@ class EmotionRobot(QObject):
         self.last_emotion_infer_time = 0.0
         self.last_emotion = "no_face"
         self.last_emotion_prob = 0.0
+        self.smooth_candidate_emotion = None
+        self.smooth_candidate_count = 0
+        self.last_debug_save_time = 0.0
         # 终端只在表情变化时打印一次，避免刷屏。
         self._last_print_emotion = None
         self.no_face_count = 0
+        self.last_stable_switch_time = 0.0
+
+        # 情绪关怀提示：只跟“统计事件”绑定，不再跟每一帧识别绑定。
+        # 这样小程序统计 +1 时，板端 UI/语音才提示一次，避免随机帧抖动触发播报。
+        self.last_emotion_prompt_time = 0.0
+        self.emotion_wav_lock = threading.Lock()
+        self.emotion_wav_proc = None
 
         # ===== 连接 UI 信号 =====
         self.ui_clear_chat.connect(self._on_ui_clear_chat)
@@ -146,9 +157,7 @@ class EmotionRobot(QObject):
         self.ui.exit_chat_clicked.connect(self.on_exit_chat)
         self.ui.exit_program_clicked.connect(self.on_exit_program)
 
-        # 启动网络接口、视觉线程和 TTS 子进程
-        # HTTP 继续保留用于 Windows 浏览器调试；小程序实时数据走 WebSocket。
-        self._start_api_server()
+        # 启动 WebSocket 服务、视觉线程和 TTS 子进程
         self._start_ws_server()
         self._start_vision()
         self._start_tts_process()
@@ -163,36 +172,24 @@ class EmotionRobot(QObject):
 
         self._play_init_sound()
 
-    # ---------- 网络接口 ----------
-    def _start_api_server(self):
-        """启动给微信小程序访问的 HTTP 接口服务。
-
-        HTTP 先保留，方便 Windows 浏览器直接访问 /api/ping、/api/status 做调试。
-        小程序实时刷新主要使用 WebSocket。
-        """
-        t = threading.Thread(
-            target=run_api_server,
-            kwargs={
-                "host": "0.0.0.0",
-                "port": 5000,
-            },
-            daemon=True
-        )
-        t.start()
-        print("[HTTP] 板端接口已启动: http://0.0.0.0:5000", flush=True)
-
+    # ---------- WebSocket 接口 ----------
     def _start_ws_server(self):
-        """启动给微信小程序实时推送数据的 WebSocket 服务。"""
+        """只启动 WebSocket 服务。
+
+        小程序端的首页状态、聊天记录、情绪统计、关怀建议全部走 WebSocket。
+        这样不会再出现 HTTP 一套数据、WS 一套数据、mock 又一套数据的问题。
+        """
         t = threading.Thread(
             target=run_ws_server,
             kwargs={
-                "host": "0.0.0.0",
-                "port": 8765,
+                "host": cfg.WS_HOST,
+                "port": cfg.WS_PORT,
+                "push_interval": cfg.WS_PUSH_INTERVAL,
             },
-            daemon=True
+            daemon=True,
         )
         t.start()
-        print("[WS] 板端 WebSocket 已启动: ws://0.0.0.0:8765", flush=True)
+        print(f"[WS] 板端 WebSocket 已启动: ws://{cfg.WS_HOST}:{cfg.WS_PORT}", flush=True)
 
     # ---------- 初始化 ----------
     def _try_set_cap(self, cap, prop, value, name):
@@ -347,41 +344,156 @@ class EmotionRobot(QObject):
         self.emotion_window.clear()
         self.last_emotion = "no_face"
         self.last_emotion_prob = 0.0
+        self.smooth_candidate_emotion = None
+        self.smooth_candidate_count = 0
+        self.last_stable_switch_time = time.time()
 
     def _smooth_emotion(self, raw_emotion, prob):
-        """64×64 专用平滑：neutral 更难进入投票，非 neutral 更容易被保留。"""
-        emotion_accept_conf = cfg_get("EMOTION_MIN_ACCEPT_CONF", 0.25)
-        neutral_accept_conf = cfg_get("NEUTRAL_MIN_ACCEPT_CONF", 0.55)
-        emotion_min_vote_frames = cfg_get("EMOTION_MIN_VOTE_FRAMES", 2)
-        neutral_min_vote_frames = cfg_get("NEUTRAL_MIN_VOTE_FRAMES", 3)
+        """二级平滑：先过滤低置信度，再用投票 + 滞回切换。
 
-        if raw_emotion == "neutral":
-            if prob >= neutral_accept_conf:
-                self.emotion_window.append(raw_emotion)
-        else:
-            if prob >= emotion_accept_conf:
-                self.emotion_window.append(raw_emotion)
+        这版专门解决你现在终端里 angry / happy / neutral / sad 来回跳的问题：
+        - 低置信度结果不进入窗口；
+        - neutral 门槛更高，防止模型一抖就回平静；
+        - 最近 N 次结果必须达到票数和占比，才可能成为候选；
+        - 候选还要连续保持几轮，才真正切换 UI、App、统计状态。
+        """
+        raw_emotion = str(raw_emotion or "neutral").lower()
+        prob = float(prob or 0.0)
+        now = time.time()
+
+        emotion_accept_conf = float(cfg_get("EMOTION_MIN_ACCEPT_CONF", 0.42))
+        neutral_accept_conf = float(cfg_get("NEUTRAL_MIN_ACCEPT_CONF", 0.76))
+        emotion_min_vote_frames = int(cfg_get("EMOTION_MIN_VOTE_FRAMES", 5))
+        neutral_min_vote_frames = int(cfg_get("NEUTRAL_MIN_VOTE_FRAMES", 7))
+        emotion_switch_frames = int(cfg_get("EMOTION_SWITCH_FRAMES", 3))
+        neutral_switch_frames = int(cfg_get("NEUTRAL_SWITCH_FRAMES", 5))
+        emotion_min_vote_ratio = float(cfg_get("EMOTION_MIN_VOTE_RATIO", 0.45))
+        neutral_min_vote_ratio = float(cfg_get("NEUTRAL_MIN_VOTE_RATIO", 0.58))
+        min_hold_seconds = float(cfg_get("EMOTION_MIN_HOLD_SECONDS", 0.9))
+        strong_switch_conf = float(cfg_get("EMOTION_STRONG_SWITCH_CONF", 0.78))
+
+        accept_conf = neutral_accept_conf if raw_emotion == "neutral" else emotion_accept_conf
+        if prob >= accept_conf:
+            self.emotion_window.append((raw_emotion, prob, now))
 
         if not self.emotion_window:
-            smooth_emotion = self.last_emotion if self.last_emotion != "no_face" else raw_emotion
+            return self.last_emotion, self.last_emotion_prob
+
+        window_len = len(self.emotion_window)
+        counter = Counter(item[0] for item in self.emotion_window)
+        prob_sum = {}
+        latest_time = {}
+        for emotion, p, t in self.emotion_window:
+            prob_sum[emotion] = prob_sum.get(emotion, 0.0) + p
+            latest_time[emotion] = t
+
+        candidates = []
+        for emotion, count in counter.items():
+            avg_prob = prob_sum[emotion] / max(1, count)
+            vote_ratio = count / max(1, window_len)
+            need_votes = neutral_min_vote_frames if emotion == "neutral" else emotion_min_vote_frames
+            need_ratio = neutral_min_vote_ratio if emotion == "neutral" else emotion_min_vote_ratio
+
+            if count >= need_votes and vote_ratio >= need_ratio:
+                # 排序优先级：票数、占比、平均置信度、出现时间。
+                candidates.append((emotion, count, vote_ratio, avg_prob, latest_time.get(emotion, 0.0)))
+
+        if not candidates:
+            # 没有足够证据时，保持上一次稳定状态，不把抖动传给 UI 和 App。
+            return self.last_emotion, self.last_emotion_prob
+
+        candidates.sort(key=lambda x: (x[1], x[2], x[3], x[4]), reverse=True)
+        target_emotion, vote_count, vote_ratio, avg_prob, _ = candidates[0]
+
+        if target_emotion == self.last_emotion:
+            self.smooth_candidate_emotion = None
+            self.smooth_candidate_count = 0
+            self.last_emotion_prob = avg_prob
+            return self.last_emotion, self.last_emotion_prob
+
+        # 情绪切换的滞回：目标候选必须连续成为第一候选几次，且当前稳定情绪至少保持一小段时间。
+        if target_emotion == self.smooth_candidate_emotion:
+            self.smooth_candidate_count += 1
         else:
-            counter = Counter(self.emotion_window)
-            vote_emotion, vote_count = counter.most_common(1)[0]
+            self.smooth_candidate_emotion = target_emotion
+            self.smooth_candidate_count = 1
 
-            if vote_emotion == "neutral":
-                if vote_count >= neutral_min_vote_frames:
-                    smooth_emotion = "neutral"
-                else:
-                    smooth_emotion = self.last_emotion if self.last_emotion != "no_face" else raw_emotion
-            else:
-                if vote_count >= emotion_min_vote_frames:
-                    smooth_emotion = vote_emotion
-                else:
-                    smooth_emotion = self.last_emotion if self.last_emotion != "no_face" else raw_emotion
+        need_switch = neutral_switch_frames if target_emotion == "neutral" else emotion_switch_frames
 
-        self.last_emotion = smooth_emotion
-        self.last_emotion_prob = prob
-        return smooth_emotion, prob
+        # 非平静情绪非常明显时可以略快，但仍然至少要连续 2 次候选。
+        if target_emotion != "neutral" and avg_prob >= strong_switch_conf:
+            need_switch = max(2, min(need_switch, 2))
+
+        if self.last_emotion != "no_face" and now - self.last_stable_switch_time < min_hold_seconds:
+            return self.last_emotion, self.last_emotion_prob
+
+        if self.smooth_candidate_count < need_switch:
+            return self.last_emotion, self.last_emotion_prob
+
+        self.last_emotion = target_emotion
+        self.last_emotion_prob = avg_prob
+        self.last_stable_switch_time = now
+        self.smooth_candidate_emotion = None
+        self.smooth_candidate_count = 0
+        return self.last_emotion, self.last_emotion_prob
+
+    def _handle_emotion_count_event(self, event):
+        """
+        情绪统计事件触发后的关怀提示和预置语音。
+
+        注意：
+        这里不能再限制 current_page == "robot"。
+        因为第 2 个 UI 是 chat，第 3 个 UI 是 face，
+        但这两个页面也应该能同步情绪提示和语音播报。
+        """
+
+        if not event:
+            return
+
+        # 只有在“情绪检测模式”下才主动关怀。
+        # 如果已经进入正式聊天模式，就不要频繁打断用户。
+        if self.current_mode != "emotion":
+            return
+
+        # 用户正在录音或者机器人正在说话时，不叠加情绪提示音。
+        if self.is_recording or self.is_playing_tts:
+            return
+
+        now = time.time()
+        prompt_min_interval = float(cfg_get("EMOTION_PROMPT_MIN_INTERVAL", 2.0))
+        if now - self.last_emotion_prompt_time < prompt_min_interval:
+            return
+
+        emotion = str(event.get("emotion", "")).lower()
+        if emotion in ("", "neutral", "no_face"):
+            return
+
+        self.last_emotion_prompt_time = now
+        self.pending_strong_emotion = emotion.capitalize()
+
+        cn_emotion = event.get("emotion_cn") or {
+            "angry": "生气",
+            "happy": "开心",
+            "neutral": "平静",
+            "sad": "难过",
+            "surprise": "惊讶",
+            "fear": "害怕",
+            "disgust": "厌恶",
+        }.get(emotion, emotion)
+
+        ask_text = f"检测到您似乎{cn_emotion}，愿意和我聊聊吗？"
+
+        print(
+            f"[情绪事件] {emotion} +1，当前页面={self.ui.current_page}，触发提示和语音",
+            flush=True
+        )
+
+        # 不管当前在第 1 / 第 2 / 第 3 个 UI，都把提示写入聊天区。
+        # 如果当前不在聊天页，切到聊天页后也能看到。
+        self.ui_append_system.emit(ask_text)
+
+        # 不管当前在哪个页面，只要形成有效情绪事件，就播报。
+        self._play_emotion_wav_async(emotion)
 
     def _handle_no_face(self, display_frame):
         self.no_face_count += 1
@@ -500,30 +612,14 @@ class EmotionRobot(QObject):
                 self.ui_set_emotion.emit(emotion, ui_tip, strong)
                 self.ui_set_user_face.emit(display_frame, emotion, prob)
 
-                # 同步当前表情给微信小程序
-                robot_state.update_emotion(
+                # 同步当前稳定表情给微信小程序。
+                # 如果这次形成了新的“情绪统计事件”，就同步触发板端 UI 提示和预置语音。
+                emotion_event = robot_state.update_emotion(
                     emotion=emotion,
                     confidence=prob,
                     face_detected=True
                 )
-
-                if strong and self.current_mode == "emotion" and self.ui.current_page == "robot":
-                    now = time.time()
-                    if now - self.last_strong_emotion_time > cfg.STRONG_EMOTION_COOLDOWN:
-                        self.last_strong_emotion_time = now
-                        self.pending_strong_emotion = emotion.capitalize()
-                        cn_emotion = {
-                            "angry": "生气",
-                            "happy": "开心",
-                            "neutral": "平静",
-                            "sad": "难过",
-                            "surprise": "惊讶",
-                            "fear": "害怕",
-                            "disgust": "厌恶",
-                        }.get(emotion, emotion)
-                        ask_text = f"检测到您似乎{cn_emotion}，愿意和我聊聊吗？"
-                        self.ui_append_system.emit(ask_text)
-                        self._play_emotion_wav(emotion)
+                self._handle_emotion_count_event(emotion_event)
 
             except Exception as e:
                 print(f"[视觉] 单帧处理失败: {e}", flush=True)
@@ -870,18 +966,30 @@ class EmotionRobot(QObject):
         threading.Thread(target=worker, daemon=True).start()
 
     # ---------- 播放预置 WAV ----------
+    def _play_emotion_wav_async(self, emotion):
+        """异步播放情绪提示音，避免 aplay 阻塞视觉识别线程。"""
+        threading.Thread(target=self._play_emotion_wav, args=(emotion,), daemon=True).start()
+
     def _play_emotion_wav(self, emotion):
         wav_name = emotion.lower() + ".wav"
         wav_path = cfg.EMOTION_WAV_DIR / wav_name
-        if wav_path.exists():
-            subprocess.run(
-                ["aplay", "-D", cfg.APLAY_DEVICE, str(wav_path)],
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-            )
-        else:
+        if not wav_path.exists():
             print(f"[情绪语音] 文件不存在: {wav_path}", flush=True)
+            return
+
+        with self.emotion_wav_lock:
+            try:
+                # 上一个提示音还没播完就不叠加，避免声音混在一起。
+                if self.emotion_wav_proc is not None and self.emotion_wav_proc.poll() is None:
+                    return
+
+                self.emotion_wav_proc = subprocess.Popen(
+                    ["aplay", "-D", cfg.APLAY_DEVICE, str(wav_path)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except Exception as e:
+                print(f"[情绪语音] 播放失败: {e}", flush=True)
 
     def _play_init_sound(self):
         if cfg.INIT_WAV.exists():

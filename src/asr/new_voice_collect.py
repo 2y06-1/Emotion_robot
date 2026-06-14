@@ -11,11 +11,6 @@ import sounddevice as sd
 class Voice_Collect:
     """
     录音采集模块。
-
-    接口原则：
-    - 本文件不读取 config.json。
-    - 本文件不写死录音目录、设备号、阈值、通道数等配置。
-    - 所有配置由 main.py 从 config.py 读取后传入。
     """
 
     def __init__(

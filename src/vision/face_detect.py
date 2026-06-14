@@ -7,12 +7,8 @@ import onnxruntime as ort
 
 
 class Face_Detect:
-    """人脸检测模块。
-
-    接口原则：
-    - 本文件不读取 config.json。
-    - 本文件不写死模型路径、provider、线程数。
-    - detect_face/crop 所需阈值和尺寸由 main.py 从 config.py 读取后传入。
+    """
+    人脸检测模块。
     """
 
     def __init__(self, model_path, provider, threads):

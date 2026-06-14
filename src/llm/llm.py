@@ -5,12 +5,8 @@ import requests
 
 
 class Ollama_chat:
-    """Ollama 对话模块。
-
-    接口原则：
-    - 本文件不读取 config.json。
-    - 本文件不写死 base_url、model_name、chat_history 路径。
-    - 所有配置由 main.py 从 config.py 获取后传入。
+    """
+    Ollama 对话模块。
     """
 
     def __init__(self, base_url, model_name, txt_path, stream, timeout):
