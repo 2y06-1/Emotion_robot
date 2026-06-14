@@ -241,7 +241,7 @@ async def ws_handler(websocket, path=None):
         print(f"[WS] 小程序已断开，当前连接数: {len(CLIENTS)}", flush=True)
 
 
-async def _run_ws_server_async(host="0.0.0.0", port=8765):
+async def _run_ws_server_async(host="0.0.0.0", port=8765, push_interval=0.5):
     async with websockets.serve(
         ws_handler,
         host,
@@ -251,14 +251,14 @@ async def _run_ws_server_async(host="0.0.0.0", port=8765):
         max_size=2 * 1024 * 1024,
     ):
         print(f"[WS] WebSocket 服务运行中: ws://{host}:{port}", flush=True)
-        asyncio.create_task(broadcast_loop(push_interval=1.0))
+        asyncio.create_task(broadcast_loop(push_interval=push_interval))
         await asyncio.Future()
 
 
-def run_ws_server(host="0.0.0.0", port=8765):
+def run_ws_server(host="0.0.0.0", port=8765, push_interval=0.5):
     """给 main.py 的后台线程调用。"""
     try:
-        asyncio.run(_run_ws_server_async(host=host, port=port))
+        asyncio.run(_run_ws_server_async(host=host, port=port, push_interval=push_interval))
     except Exception as e:
         print(f"[WS] WebSocket 服务启动失败: {e}", flush=True)
         traceback.print_exc()
