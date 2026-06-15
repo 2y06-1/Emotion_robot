@@ -5,7 +5,6 @@ import cv2
 import numpy as np
 import onnxruntime as ort
 
-
 class Face_Detect:
     """
     人脸检测模块。

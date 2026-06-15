@@ -638,10 +638,8 @@ class MainWindow(QWidget):
 
     # ---------- 聊天消息 ----------
     def clear_chat(self):
-        """清空聊天内容。
-
-        这里不能把 empty_hint_label deleteLater() 之后再复用，
-        否则点击“结束聊天”时会出现 wrapped C/C++ object has been deleted。
+        """
+        清空聊天内容。
         """
         self._message_count = 0
 
@@ -671,7 +669,6 @@ class MainWindow(QWidget):
             self.empty_hint_label.setText("我在这里，按下开始说话")
             self.empty_hint_label.setParent(self.chat_content)
         except RuntimeError:
-            # QLabel 底层 C++ 对象已经被 Qt 回收时，重新创建一个新的。
             self.empty_hint_label = QLabel("我在这里，按下开始说话")
             self.empty_hint_label.setObjectName("emptyHintLabel")
             self.empty_hint_label.setAlignment(Qt.AlignCenter)
@@ -705,7 +702,6 @@ class MainWindow(QWidget):
         row_layout.setSpacing(0)
 
         bubble = ChatBubble(text, role=role)
-        # 800x480 屏幕下，气泡不要铺满，看起来更自然。
         bubble.setMaximumWidth(520 if role != "system" else 440)
 
         if role == "user":
@@ -719,7 +715,6 @@ class MainWindow(QWidget):
             row_layout.addWidget(bubble, 0, Qt.AlignLeft)
             row_layout.addStretch(1)
 
-        # 插入到底部 stretch 之前。
         insert_index = max(0, self.chat_layout.count() - 1)
         self.chat_layout.insertWidget(insert_index, row)
         self._scroll_chat_to_bottom()
