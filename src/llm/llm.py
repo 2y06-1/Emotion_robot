@@ -1,13 +1,13 @@
 import json
+import re
+import html
 from pathlib import Path
 
 import requests
 
 
 class Ollama_chat:
-    """
-    Ollama 对话模块。
-    """
+    """Ollama 对话模块。"""
 
     def __init__(self, base_url, model_name, txt_path, stream, timeout):
         self.base_url = str(base_url).rstrip("/")
@@ -28,12 +28,26 @@ class Ollama_chat:
         with open(self.txt_path, "a", encoding="utf-8") as f:
             f.write(f"{role}: {content}\n")
 
-    def chat_ollama(self, user_message):
-        self.history_append("user", user_message)
+    def chat_ollama(self, user_message, system_prompt=None):
+        """发送对话给 Ollama。
+
+        user_message：用户真正说的话。
+        system_prompt：机器人身份、情绪策略等系统提示。
+
+        关键点：不要把长 Prompt 当 user_message 发送，否则本地模型容易把 Prompt 原样复述。
+        """
+        user_message = str(user_message or "").strip()
+        system_prompt = str(system_prompt or "").strip()
+
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.extend(self.history)
+        messages.append({"role": "user", "content": user_message})
 
         payload = {
             "model": self.model_name,
-            "messages": self.history,
+            "messages": messages,
             "stream": self.stream,
         }
 
@@ -50,8 +64,9 @@ class Ollama_chat:
         if not self.stream:
             data = response.json()
             reply = data.get("message", {}).get("content", "")
-            reply = self._remove_think_content(reply)
+            reply = self._clean_reply(reply)
             print(reply, flush=True)
+            self.history_append("user", user_message)
             self.history_append("assistant", reply)
             return reply
 
@@ -96,7 +111,9 @@ class Ollama_chat:
             if chunk.get("done"):
                 break
 
+        full_reply = self._clean_reply(full_reply)
         print(flush=True)
+        self.history_append("user", user_message)
         self.history_append("assistant", full_reply)
         return full_reply
 
@@ -118,4 +135,41 @@ class Ollama_chat:
             if start == -1 or end == -1 or end < start:
                 break
             text = text[:start] + text[end + len("</think>"):]
+        return text
+
+    @classmethod
+    def _clean_reply(cls, text):
+        text = cls._remove_think_content(str(text or "")).strip()
+        text = html.unescape(text).strip()
+
+        # 去掉模型可能输出的外层引号。
+        quote_pairs = [
+            ('"', '"'),
+            ("'", "'"),
+            ("“", "”"),
+            ("‘", "’"),
+            ("「", "」"),
+            ("『", "』"),
+        ]
+        changed = True
+        while changed and len(text) >= 2:
+            changed = False
+            for left, right in quote_pairs:
+                if text.startswith(left) and text.endswith(right):
+                    text = text[1:-1].strip()
+                    changed = True
+
+        # 如果模型仍然把系统提示词开头复述出来，做一个兜底截断。
+        bad_starts = [
+            "你是一个智能情感陪伴机器人",
+            "基本要求：",
+            "当前可靠的视觉情绪信息：",
+            "当前视觉情绪识别结果：",
+        ]
+        if any(text.startswith(s) for s in bad_starts):
+            # 这种回复不可用，返回空，让 main.py 使用兜底句。
+            return ""
+
+        # 去掉 Markdown 列表符号。
+        text = re.sub(r"^\s*[-*•]\s*", "", text).strip()
         return text

@@ -5,6 +5,11 @@ from pathlib import Path
 class AppConfig:
     """
     配置读取层。
+
+    规则：
+    - config.json 只存配置数据。
+    - config.py 只负责读取 json，并把配置整理成 main.py 好调用的属性。
+    - 功能模块不读取 config.json，也不写死真实路径。
     """
 
     def __init__(self, config_path=None):
@@ -143,6 +148,9 @@ class AppConfig:
         self.EMOTION_MIN_HOLD_SECONDS = float(vision.get("emotion_min_hold_seconds", 0.9))
         self.EMOTION_STRONG_SWITCH_CONF = float(vision.get("emotion_strong_switch_conf", 0.78))
         self.STRONG_EMOTION_CONF = float(vision.get("strong_emotion_conf", 0.58))
+        self.SPECIAL_EMOTION_LOCK_SECONDS = float(vision.get("special_emotion_lock_seconds", 6.0))
+        self.SPECIAL_EMOTION_LOCK_MIN_CONF = float(vision.get("special_emotion_lock_min_conf", self.STRONG_EMOTION_CONF))
+        self.SPECIAL_EMOTION_RELOCK_REQUIRES_EXIT = bool(vision.get("special_emotion_relock_requires_exit", True))
         self.STRONG_EMOTION_COOLDOWN = float(vision.get("strong_emotion_cooldown", 8.0))
         self.EMOTION_PROMPT_MIN_INTERVAL = float(vision.get("emotion_prompt_min_interval", 2.0))
         self.NO_FACE_RESET_FRAMES = int(vision.get("no_face_reset_frames", 8))

@@ -34,6 +34,7 @@ from ui import MainWindow
 from new_voice_collect import Voice_Collect
 from voice_tranform import Voice_Transform
 from llm import Ollama_chat
+from emotion_prompt import build_robot_system_prompt, normalize_emotion_key, SPECIAL_EMOTIONS
 from face_detect import Face_Detect
 from emotion_detect import EmotionClassifier
 
@@ -56,6 +57,8 @@ class EmotionRobot(QObject):
     ui_append_emotion = pyqtSignal(str, str)
     ui_set_state_emotion_detecting = pyqtSignal()
     ui_set_state_chatting = pyqtSignal()
+    ui_set_state_thinking = pyqtSignal()
+    ui_set_state_speaking = pyqtSignal()
     ui_set_state_error = pyqtSignal(str)
     ui_set_emotion = pyqtSignal(str, str, bool)
     ui_show_robot = pyqtSignal()
@@ -100,7 +103,9 @@ class EmotionRobot(QObject):
         self.is_recording = False
         self.is_playing_tts = False
         self.active_emotion = None
+        self.active_emotion_confidence = 0
         self.pending_strong_emotion = None
+        self.pending_strong_confidence = 0
 
         self.task_lock = threading.Lock()
         self.task_id = 0
@@ -138,6 +143,18 @@ class EmotionRobot(QObject):
         self.emotion_wav_lock = threading.Lock()
         self.emotion_wav_proc = None
 
+        # 特殊情绪锁定：检测到 angry / happy / sad / surprise 后，
+        # 锁定一段时间，不允许马上跳到另一个特殊情绪。
+        # 例如 surprise 刚触发后，6 秒内不会立刻跳到 happy。
+        self.special_emotions = set(SPECIAL_EMOTIONS)
+        self.locked_special_emotion = None
+        self.locked_special_prob = 0.0
+        self.locked_special_until = 0.0
+        # 记录刚刚解锁的特殊情绪，避免锁定结束后同一个情绪马上反复重新锁定。
+        # 例如 happy 锁定结束后，如果平滑结果仍然是 happy，不会马上再次锁 happy；
+        # 只有先离开 happy（变成 neutral/no_face 或另一个特殊情绪）后，才允许再次锁 happy。
+        self.last_unlocked_special_emotion = None
+
         # ===== 连接 UI 信号 =====
         self.ui_clear_chat.connect(self._on_ui_clear_chat)
         self.ui_append_user.connect(self.ui.append_user_message)
@@ -146,6 +163,8 @@ class EmotionRobot(QObject):
         self.ui_append_emotion.connect(self.ui.append_emotion_message)
         self.ui_set_state_emotion_detecting.connect(self.ui.set_state_emotion_detecting)
         self.ui_set_state_chatting.connect(self.ui.set_state_chatting)
+        self.ui_set_state_thinking.connect(self.ui.set_state_thinking)
+        self.ui_set_state_speaking.connect(self.ui.set_state_speaking)
         self.ui_set_state_error.connect(self.ui.set_state_error)
         self.ui_set_emotion.connect(self.ui.set_emotion)
         self.ui_show_robot.connect(self.ui.show_robot_ui)
@@ -347,6 +366,20 @@ class EmotionRobot(QObject):
         self.smooth_candidate_emotion = None
         self.smooth_candidate_count = 0
         self.last_stable_switch_time = time.time()
+        self._reset_special_emotion_lock()
+
+    def _reset_special_emotion_lock(self, clear_relock_history=True):
+        """清空特殊情绪锁定状态。
+
+        clear_relock_history=True 时，连“刚刚解锁过的情绪”也一起清空。
+        no_face、退出聊天、重置状态时应该清空；
+        但锁定自然结束时不能清空，否则同一个情绪会马上再次锁定。
+        """
+        self.locked_special_emotion = None
+        self.locked_special_prob = 0.0
+        self.locked_special_until = 0.0
+        if clear_relock_history:
+            self.last_unlocked_special_emotion = None
 
     def _smooth_emotion(self, raw_emotion, prob):
         """二级平滑：先过滤低置信度，再用投票 + 滞回切换。
@@ -437,6 +470,94 @@ class EmotionRobot(QObject):
         self.smooth_candidate_count = 0
         return self.last_emotion, self.last_emotion_prob
 
+    def _apply_special_emotion_lock(self, emotion, prob, allow_start=True):
+        """特殊情绪锁定机制。\n\n        目标：\n        1. 检测到 angry / happy / sad / surprise 后，短时间锁定；\n        2. 锁定期间不允许马上跳到另一个特殊情绪；\n        3. 锁定自然结束后，不允许“同一个情绪”立刻再次锁定；\n        4. 只有离开该情绪后，才允许它下一次重新锁定。\n\n        这样可以避免终端一直出现：\n        锁定 happy -> happy 锁定结束 -> 又锁定 happy -> 又结束 -> 又锁定 happy\n        """
+        emotion = str(emotion or "neutral").lower()
+        prob = float(prob or 0.0)
+        now = time.time()
+
+        lock_seconds = float(cfg_get("SPECIAL_EMOTION_LOCK_SECONDS", 6.0))
+        lock_min_conf = float(cfg_get("SPECIAL_EMOTION_LOCK_MIN_CONF", cfg_get("STRONG_EMOTION_CONF", 0.58)))
+        relock_requires_exit = bool(cfg_get("SPECIAL_EMOTION_RELOCK_REQUIRES_EXIT", True))
+
+        # no_face：直接清空锁定和重锁历史。
+        # 没有人脸时，不应该继续保持刚才的特殊情绪。
+        if emotion == "no_face":
+            if self.locked_special_emotion:
+                print(
+                    f"[情绪锁定] 检测到 no_face，清除锁定 {self.locked_special_emotion}",
+                    flush=True,
+                )
+            self._reset_special_emotion_lock(clear_relock_history=True)
+            return emotion, prob
+
+        # 1. 锁定期内：无论平滑层又输出了什么，都继续保持锁定情绪。
+        if self.locked_special_emotion and now < self.locked_special_until:
+            locked = self.locked_special_emotion
+
+            # 同一个情绪继续出现时，只更新更高置信度，不重新计时。
+            if emotion == locked:
+                self.locked_special_prob = max(self.locked_special_prob, prob)
+
+            self.last_emotion = locked
+            self.last_emotion_prob = self.locked_special_prob
+            return locked, self.locked_special_prob
+
+        # 2. 锁定期自然结束：记录刚刚解锁的情绪，但不要立刻重锁同一个情绪。
+        if self.locked_special_emotion and now >= self.locked_special_until:
+            old = self.locked_special_emotion
+            print(
+                f"[情绪锁定] {old} 锁定结束，允许检测下一个情绪",
+                flush=True,
+            )
+            self.last_unlocked_special_emotion = old
+            self._reset_special_emotion_lock(clear_relock_history=False)
+
+            # 这里直接返回当前平滑结果，避免在同一轮马上重新锁定 old。
+            return emotion, prob
+
+        # 3. neutral：说明已经离开特殊情绪，可以允许以后同一个特殊情绪重新锁定。
+        if emotion == "neutral":
+            if relock_requires_exit and self.last_unlocked_special_emotion:
+                self.last_unlocked_special_emotion = None
+            return emotion, prob
+
+        # 4. 非特殊情绪不触发锁定。
+        if emotion not in self.special_emotions:
+            if relock_requires_exit and self.last_unlocked_special_emotion:
+                self.last_unlocked_special_emotion = None
+            return emotion, prob
+
+        # 5. 本轮没有新推理时，只维持已有锁，不开启新锁。
+        if not allow_start:
+            return emotion, prob
+
+        # 6. 置信度不够，不触发锁定。
+        if prob < lock_min_conf:
+            return emotion, prob
+
+        # 7. 防止同一个情绪刚解锁就马上重新锁。
+        # 例如 happy 锁定结束后，如果模型仍然稳定输出 happy，就正常显示 happy，
+        # 但不再打印“锁定 happy”，也不会继续阻止其他情绪切换。
+        if relock_requires_exit and emotion == self.last_unlocked_special_emotion:
+            return emotion, prob
+
+        # 8. 如果是新的特殊情绪，开始锁定。
+        self.locked_special_emotion = emotion
+        self.locked_special_prob = prob
+        self.locked_special_until = now + lock_seconds
+        self.last_unlocked_special_emotion = None
+
+        self.last_emotion = emotion
+        self.last_emotion_prob = prob
+
+        print(
+            f"[情绪锁定] 锁定 {emotion} {lock_seconds:.1f}s，prob={prob:.2f}",
+            flush=True,
+        )
+
+        return emotion, prob
+
     def _handle_emotion_count_event(self, event):
         """
         情绪统计事件触发后的关怀提示和预置语音。
@@ -469,7 +590,8 @@ class EmotionRobot(QObject):
             return
 
         self.last_emotion_prompt_time = now
-        self.pending_strong_emotion = emotion.capitalize()
+        self.pending_strong_emotion = emotion
+        self.pending_strong_confidence = event.get("confidence", 0)
 
         cn_emotion = event.get("emotion_cn") or {
             "angry": "生气",
@@ -598,6 +720,14 @@ class EmotionRobot(QObject):
                     raw_emotion, prob = self.emotion_cls.predict(face_img)
 
                     emotion, prob = self._smooth_emotion(raw_emotion, prob)
+
+                    # 特殊情绪锁定：避免刚检测到 surprise，又马上跳到 happy。
+                    emotion, prob = self._apply_special_emotion_lock(
+                        emotion,
+                        prob,
+                        allow_start=True,
+                    )
+
                     if emotion != self._last_print_emotion:
                         print(f"[当前表情] {emotion} ({prob:.2f})", flush=True)
                         self._last_print_emotion = emotion
@@ -606,6 +736,14 @@ class EmotionRobot(QObject):
                 else:
                     emotion = self.last_emotion
                     prob = self.last_emotion_prob
+
+                    # 没有新推理时，只维持已有锁定，不重新开启锁定。
+                    emotion, prob = self._apply_special_emotion_lock(
+                        emotion,
+                        prob,
+                        allow_start=False,
+                    )
+
                     ui_tip = f"置信度 {prob:.2f}"
 
                 strong = emotion != "neutral" and emotion != "no_face" and prob >= cfg.STRONG_EMOTION_CONF
@@ -759,7 +897,11 @@ class EmotionRobot(QObject):
     def _on_tts_start(self, text, task_id):
         if self._is_task_cancelled(task_id):
             return
+
         self.is_playing_tts = True
+        # AI 文本已经生成，接下来进入语音播报阶段。
+        # 这样第一次对话不会在 ASR 文本刚出现时就变回“开始说话”。
+        self.ui_set_state_speaking.emit()
         self.ui.record_button.setEnabled(False)
 
         def worker():
@@ -815,7 +957,10 @@ class EmotionRobot(QObject):
         self.llm_bot.history_clear()
         self.current_mode = "emotion"
         self.active_emotion = None
+        self.active_emotion_confidence = 0
         self.pending_strong_emotion = None
+        self.pending_strong_confidence = 0
+        self._reset_special_emotion_lock()
         self.ui_clear_chat.emit()
         self.ui_set_state_emotion_detecting.emit()
         self.ui_set_emotion.emit("no_face", "", False)
@@ -897,57 +1042,126 @@ class EmotionRobot(QObject):
         if self.current_mode == "emotion":
             if self.pending_strong_emotion:
                 emotion = self.pending_strong_emotion
+                emotion_confidence = self.pending_strong_confidence
                 self.pending_strong_emotion = None
-                self._enter_chat_with_emotion(user_text, emotion, task_id)
+                self.pending_strong_confidence = 0
+                self._enter_chat_with_emotion(user_text, emotion, emotion_confidence, task_id)
             else:
                 self._start_normal_chat(user_text, task_id)
         else:
             self._handle_chat_message(user_text, task_id)
 
-    def _enter_chat_with_emotion(self, user_text, emotion, task_id):
+    def _enter_chat_with_emotion(self, user_text, emotion, emotion_confidence, task_id):
         self.current_mode = "chat"
-        self.active_emotion = emotion
+
+        # 只有 angry / happy / sad / surprise 作为特殊情绪回复触发条件。
+        # 这里保存的是“触发聊天的那次情绪事件”，避免录音时视觉暂停或暂时 no_face 导致置信度变成 0。
+        emotion_key = normalize_emotion_key(emotion)
+        if emotion_key in SPECIAL_EMOTIONS:
+            self.active_emotion = emotion_key
+            self.active_emotion_confidence = emotion_confidence
+        else:
+            self.active_emotion = None
+            self.active_emotion_confidence = 0
+
         self.llm_bot.history_clear()
         self.ui_clear_chat.emit()
         self.ui_show_chat.emit()
-        self.ui_set_state_chatting.emit()
+        # 第一次进入聊天页后，AI 还没生成回复，应该保持“思考中”。
+        self.ui_set_state_thinking.emit()
         self.ui_append_user.emit(user_text)
-        enhanced = f"[用户当前情绪：{emotion}] {user_text}"
-        self._generate_ai_reply(enhanced, task_id)
+        self._generate_ai_reply(user_text, task_id, emotion_override=self.active_emotion)
 
     def _start_normal_chat(self, user_text, task_id):
         self.current_mode = "chat"
         self.active_emotion = None
+        self.active_emotion_confidence = 0
         self.llm_bot.history_clear()
         self.ui_clear_chat.emit()
         self.ui_show_chat.emit()
-        self.ui_set_state_chatting.emit()
+        # 第一次普通聊天：用户文本显示后，AI 正在生成回复。
+        self.ui_set_state_thinking.emit()
         self.ui_append_user.emit(user_text)
         self._generate_ai_reply(user_text, task_id)
 
     def _handle_chat_message(self, user_text, task_id):
         self.ui_append_user.emit(user_text)
-        if self.active_emotion:
-            message = f"[用户当前情绪：{self.active_emotion}] {user_text}"
-        else:
-            message = user_text
-        self._generate_ai_reply(message, task_id)
+        # 后续对话也统一显示“思考中”，直到 AI 回复生成并开始播报。
+        self.ui_set_state_thinking.emit()
+        self._generate_ai_reply(user_text, task_id, emotion_override=self.active_emotion)
 
     # ---------- LLM ----------
-    def _generate_ai_reply(self, message, task_id):
+    def _build_robot_system_prompt(self, emotion_override=None):
+        """构造 system prompt。
+
+        关键变化：
+        - 用户原话不再拼进大段 Prompt；
+        - 用户原话会作为 user message 单独发给 Ollama；
+        - 情绪要求只放在 system message，避免模型把提示词原样复述出来。
+        """
+        status = robot_state.get_status()
+
+        system_prompt, info = build_robot_system_prompt(
+            emotion=status.get("emotion", "neutral"),
+            confidence=status.get("confidence", 0),
+            face_detected=status.get("face_detected", False),
+            active_emotion=emotion_override,
+            active_confidence=self.active_emotion_confidence if emotion_override else None,
+            min_confidence=50,
+        )
+
+        print(
+            f"[LLM提示] mode={info.get('mode')}, emotion={info.get('emotion')}, "
+            f"confidence={info.get('confidence')}, face_detected={info.get('face_detected')}, "
+            f"source={info.get('source')}",
+            flush=True,
+        )
+
+        return system_prompt
+
+    def _fallback_reply(self, user_text, emotion_override=None):
+        """当本地模型复述提示词或输出为空时的兜底回复。"""
+        text = str(user_text or "").strip()
+        emotion = normalize_emotion_key(emotion_override or robot_state.current_emotion)
+        cn = {
+            "happy": "开心",
+            "angry": "生气或烦躁",
+            "sad": "难过",
+            "surprise": "惊喜或惊讶",
+        }.get(emotion, "平静")
+
+        if any(k in text for k in ["你是谁", "你叫什么", "你是干什么"]):
+            return "我是您的智能情感陪伴机器人，可以听您说话，也可以结合您的表情状态给出更贴近心情的回应。"
+
+        if any(k in text for k in ["心情", "情绪", "表情", "状态"]):
+            if emotion in SPECIAL_EMOTIONS:
+                return f"我感觉您现在更接近{cn}的状态。您可以慢慢和我说，我会认真听。"
+            return "我现在没有检测到特别明显的情绪波动，整体看起来比较平静。"
+
+        return "我在这里，可以慢慢和我说。"
+
+    def _generate_ai_reply(self, user_text, task_id, emotion_override=None):
         def worker():
             if self._is_task_cancelled(task_id):
                 return
             try:
-                reply = self.llm_bot.chat_ollama(message).strip()
+                system_prompt = self._build_robot_system_prompt(
+                    emotion_override=emotion_override,
+                )
+
+                reply = self.llm_bot.chat_ollama(
+                    user_text,
+                    system_prompt=system_prompt,
+                ).strip()
+
                 if self._is_task_cancelled(task_id):
                     return
                 if not reply:
-                    reply = "我好像没听清，可以再说一遍吗？"
+                    reply = self._fallback_reply(user_text, emotion_override)
             except Exception as e:
                 if self._is_task_cancelled(task_id):
                     return
-                reply = "抱歉，我现在脑子有点乱，请稍后再试。"
+                reply = self._fallback_reply(user_text, emotion_override)
                 print(f"[LLM 错误] {e}", flush=True)
 
             if self._is_task_cancelled(task_id):

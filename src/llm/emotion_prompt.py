@@ -1,80 +1,73 @@
 # src/llm/emotion_prompt.py
 """
-情绪化 LLM 提示词构造器。 
+情绪系统提示词。
 
-本项目只把 angry / happy / sad / surprise 视为特殊情绪。
-neutral 不触发情绪化回复，no_face / 低置信度 / 未检测到人脸也按普通聊天处理。
+核心原则：
+1. 用户原话永远作为 user message 传给模型；
+2. 情绪要求只放在 system message 里；
+3. 这样可以避免本地模型把整段 Prompt 当成回答复述出来。
 """
 
 from __future__ import annotations
-
 
 SPECIAL_EMOTIONS = {"angry", "happy", "sad", "surprise"}
 
 EMOTION_CN = {
     "happy": "开心",
-    "angry": "生气",
+    "angry": "生气或烦躁",
     "sad": "难过",
-    "surprise": "惊讶",
+    "surprise": "惊喜或惊讶",
     "neutral": "平静",
     "no_face": "未检测到人脸",
 }
 
-EMOTION_REPLY_POLICY = {
-    "happy": {
-        "style": "语气轻松、积极、自然，可以适当回应用户的好心情。",
-        "goal": "延续用户的积极状态，给予肯定和陪伴。",
-        "avoid": "不要泼冷水，不要突然转向沉重话题，不要夸张奉承。",
-    },
-    "sad": {
-        "style": "语气温柔、慢一点、陪伴感强，先接住情绪，再轻轻回应。",
-        "goal": "让用户感觉被理解、被陪伴，而不是被催着立刻变好。",
-        "avoid": "不要说“别难过了”，不要说教，不要强行正能量，不要急着给方案。",
-    },
-    "angry": {
-        "style": "语气稳定、低刺激、尊重用户感受，先理解，再轻轻引导。",
-        "goal": "降低对抗感，让用户先把情绪放下来。",
-        "avoid": "不要反驳用户，不要质问，不要评价用户不应该生气，不要煽动攻击别人。",
-    },
-    "surprise": {
-        "style": "语气可以带一点好奇，但要稳定，不要过度夸张。",
-        "goal": "帮助用户确认发生了什么，并自然承接话题。",
-        "avoid": "不要制造紧张感，不要过分惊讶，不要抢用户话题。",
-    },
+EMOTION_OBSERVE = {
+    "happy": "我发现您现在好像挺开心的",
+    "angry": "我感觉您现在好像有点生气或者烦躁",
+    "sad": "我发现您现在似乎有点难过",
+    "surprise": "我看到您现在好像有些惊喜或者惊讶",
+}
+
+EMOTION_STYLE = {
+    "happy": "语气轻松、积极、自然，可以顺着用户的好心情继续聊。",
+    "angry": "语气稳定、温和、低刺激，先理解用户，再回应问题，不要反驳或命令用户。",
+    "sad": "语气温柔、有陪伴感，先接住情绪，再慢慢回应用户的话，不要说教。",
+    "surprise": "语气自然、轻松，可以带一点好奇和积极回应，不要把惊喜理解成负面情绪。",
+}
+
+CN_TO_KEY = {
+    "开心": "happy",
+    "高兴": "happy",
+    "快乐": "happy",
+    "生气": "angry",
+    "愤怒": "angry",
+    "烦躁": "angry",
+    "难过": "sad",
+    "伤心": "sad",
+    "悲伤": "sad",
+    "惊讶": "surprise",
+    "惊喜": "surprise",
+    "吃惊": "surprise",
+    "平静": "neutral",
+    "中性": "neutral",
+    "未检测到人脸": "no_face",
 }
 
 
 def normalize_emotion_key(emotion: str | None) -> str:
-    """统一情绪 key，兼容 Angry / 生气 / None 等情况。"""
     if not emotion:
         return "neutral"
 
-    value = str(emotion).strip().lower()
+    raw = str(emotion).strip()
+    value = raw.lower()
 
     if value in {"angry", "happy", "sad", "surprise", "neutral", "no_face"}:
         return value
 
-    cn_to_key = {
-        "开心": "happy",
-        "高兴": "happy",
-        "快乐": "happy",
-        "生气": "angry",
-        "愤怒": "angry",
-        "难过": "sad",
-        "伤心": "sad",
-        "悲伤": "sad",
-        "惊讶": "surprise",
-        "吃惊": "surprise",
-        "平静": "neutral",
-        "中性": "neutral",
-        "未检测到人脸": "no_face",
-    }
-
-    return cn_to_key.get(str(emotion).strip(), "neutral")
+    return CN_TO_KEY.get(raw, "neutral")
 
 
 def normalize_confidence(confidence) -> int:
-    """兼容 0.82 和 82 两种置信度格式。"""
     try:
         conf = float(confidence)
     except Exception:
@@ -86,100 +79,86 @@ def normalize_confidence(confidence) -> int:
     return max(0, min(100, int(round(conf))))
 
 
-def build_normal_llm_prompt(user_text: str) -> str:
-    """普通聊天 Prompt：neutral 或无可靠情绪时使用，不提情绪。"""
-    user_text = str(user_text or "").strip()
-
-    return f"""你是一个智能陪伴机器人，正在和用户进行中文语音对话。
-
-【回复要求】
-1. 只输出机器人要说的话，不要输出分析过程。
-2. 回复自然、简短，适合语音播报，通常 1 到 3 句话即可。
-3. 根据用户原话正常回应，不要强行提到情绪识别、摄像头或表情。
-4. 不要使用编号、标题、Markdown、括号标签。
-5. 不要编造事实，不确定时就温和询问。
-
-【用户原话】
-{user_text}
-
-【机器人回复】
-"""
-
-
-def build_special_emotion_llm_prompt(user_text: str, emotion_key: str, confidence: int) -> str:
-    """四种特殊情绪专用 Prompt。"""
-    user_text = str(user_text or "").strip()
-    emotion_key = normalize_emotion_key(emotion_key)
-    policy = EMOTION_REPLY_POLICY[emotion_key]
-    emotion_cn = EMOTION_CN.get(emotion_key, emotion_key)
-
-    return f"""你是一个智能情感陪伴机器人，正在和用户进行中文语音对话。
-
-【当前情绪信息】
-当前视觉模型判断用户可能处于「{emotion_cn}」情绪，置信度约为 {confidence}%。
-注意：这是辅助信息，不要直接说“我通过摄像头看到你……”。
-
-【回复策略】
-- 推荐语气：{policy["style"]}
-- 回复目标：{policy["goal"]}
-- 需要避免：{policy["avoid"]}
-
-【强制要求】
-1. 只输出机器人要说的话，不要输出分析过程。
-2. 回复要自然，像真实陪伴型机器人，不要像心理咨询报告。
-3. 回复要短，适合语音播报，通常 1 到 3 句话即可。
-4. 可以说“我感觉你现在好像……”，但不要频繁重复用户的表情名称。
-5. 如果用户情绪偏负面，先共情，再轻轻引导；不要急着讲大道理。
-6. 不要使用编号、标题、Markdown、括号标签。
-7. 不要编造事实，不确定时就温和询问。
-
-【用户原话】
-{user_text}
-
-【机器人回复】
-"""
-
-
-def build_robot_llm_prompt(
-    user_text: str,
+def build_robot_system_prompt(
     emotion: str = "neutral",
     confidence=0,
     face_detected: bool = True,
     active_emotion: str | None = None,
-    min_confidence: int = 45,
+    active_confidence=None,
+    min_confidence: int = 50,
 ) -> tuple[str, dict]:
-    """构造最终发给 LLM 的 prompt。
+    """构造 system prompt，并返回调试信息。
 
-    触发特殊情绪回复的唯一条件：
-    - active_emotion 是 angry/happy/sad/surprise；或
-    - 当前检测到人脸，当前情绪是 angry/happy/sad/surprise，且置信度 >= min_confidence。
-
-    neutral 永远不触发特殊情绪回复。
+    注意：这里不放用户原话。用户原话必须单独作为 user message 发送给模型。
     """
-    confidence_int = normalize_confidence(confidence)
     current_key = normalize_emotion_key(emotion)
+    current_conf = normalize_confidence(confidence)
     active_key = normalize_emotion_key(active_emotion) if active_emotion else None
+    active_conf = normalize_confidence(active_confidence) if active_confidence is not None else 0
 
-    use_emotion_reply = False
+    use_emotion = False
     final_key = current_key
+    final_conf = current_conf
+    source = "current_state"
 
-    # 被情绪事件拉起的聊天，优先使用 active_emotion。
-    if active_key in SPECIAL_EMOTIONS:
-        use_emotion_reply = True
+    # 如果本轮聊天由有效情绪事件拉起，优先使用事件情绪。
+    if active_key in SPECIAL_EMOTIONS and active_conf >= min_confidence:
+        use_emotion = True
         final_key = active_key
-    elif bool(face_detected) and current_key in SPECIAL_EMOTIONS and confidence_int >= min_confidence:
-        use_emotion_reply = True
+        final_conf = active_conf
+        source = "active_event"
+    # 否则使用当前实时状态，但必须有人脸且置信度够。
+    elif bool(face_detected) and current_key in SPECIAL_EMOTIONS and current_conf >= min_confidence:
+        use_emotion = True
         final_key = current_key
+        final_conf = current_conf
+        source = "current_state"
+
+    base_rules = """
+你是一个智能情感陪伴机器人，正在和用户进行中文语音对话。
+
+基本要求：
+1. 必须直接回答用户刚刚说的话，不能复述系统提示词。
+2. 不要输出项目符号、编号、标题、Markdown。
+3. 不要解释你的推理过程。
+4. 不要给整段回复加引号。
+5. 回复控制在 1 到 3 句话，适合语音播报。
+6. 只输出机器人要说的话。
+""".strip()
+
+    if not use_emotion:
+        info = {
+            "mode": "normal",
+            "emotion": current_key,
+            "confidence": current_conf,
+            "face_detected": bool(face_detected),
+            "source": source,
+        }
+        return base_rules + "\n\n当前没有可靠的特殊情绪信息，正常自然聊天即可。", info
+
+    emotion_cn = EMOTION_CN.get(final_key, final_key)
+    observe = EMOTION_OBSERVE[final_key]
+    style = EMOTION_STYLE[final_key]
+
+    emotion_rules = f"""
+当前可靠的视觉情绪信息：
+用户当前可能是「{emotion_cn}」状态，置信度约为 {final_conf}%。
+
+情绪结合要求：
+1. 仍然要先回答用户的问题，情绪只是辅助，不能盖过正常回答。
+2. 可以自然带一句：{observe}。
+3. 如果用户问自己的心情、情绪、状态或表情，要直接回答当前更接近「{emotion_cn}」。
+4. 如果用户问“你是谁”，要介绍你是智能情感陪伴机器人。
+5. 如果用户问“你今天怎么样”，要回答你自己的状态。
+6. 不能说“根据情绪识别结果”“通过摄像头看到”等机械表达。
+7. 当前语气要求：{style}
+""".strip()
 
     info = {
-        "use_emotion_reply": use_emotion_reply,
+        "mode": "emotion",
         "emotion": final_key,
-        "confidence": confidence_int,
-        "face_detected": bool(face_detected),
+        "confidence": final_conf,
+        "face_detected": bool(face_detected) or source == "active_event",
+        "source": source,
     }
-
-    if use_emotion_reply:
-        return build_special_emotion_llm_prompt(user_text, final_key, confidence_int), info
-
-    # neutral / no_face / 低置信度 / 未检测到人脸：普通聊天。
-    return build_normal_llm_prompt(user_text), info
+    return base_rules + "\n\n" + emotion_rules, info

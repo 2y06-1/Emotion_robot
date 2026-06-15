@@ -89,6 +89,8 @@
     "emotion_min_vote_frames": 5,
     "neutral_min_vote_frames": 7,
     "strong_emotion_conf": 0.58,
+    "special_emotion_lock_seconds": 4.0,
+    "special_emotion_lock_min_conf": 0.58,
     "strong_emotion_cooldown": 8.0,
     "no_face_reset_frames": 8,
     "camera_width": 640,
@@ -113,7 +115,8 @@
     "emotion_min_vote_ratio": 0.45,
     "neutral_min_vote_ratio": 0.58,
     "emotion_min_hold_seconds": 0.9,
-    "emotion_prompt_min_interval": 2.0
+    "emotion_prompt_min_interval": 2.0,
+    "special_emotion_relock_requires_exit": true
   },
   "chat": {
     "min_text_len": 2,

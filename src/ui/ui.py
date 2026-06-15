@@ -218,7 +218,12 @@ class ChatBubble(QFrame):
             name.setObjectName("bubbleName")
             layout.addWidget(name)
 
-        label = QLabel(html.escape(text))
+        # 这里只做普通文本显示。
+        # 原来使用 html.escape(text)，会把英文双引号转成 &quot;，
+        # QLabel 按普通文本显示时就会直接看到 &quot;。
+        display_text = html.unescape(str(text or ""))
+        label = QLabel(display_text)
+        label.setTextFormat(Qt.PlainText)
         label.setObjectName("bubbleText")
         label.setWordWrap(True)
         label.setTextInteractionFlags(Qt.TextSelectableByMouse)
