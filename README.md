@@ -55,7 +55,8 @@ Emotion_robot/
 │   └── main.py              # 项目主入口
 ├── wav/                     # 初始化音频、提示音等资源
 ├── knowledge.txt            # 知识库或提示词相关文本
-├── requirements.txt         # Python 依赖
+├── requirements.txt         # venv_Python 依赖
+├── requirements1.txt         # venv_tts_Python 依赖
 └── README.md
 ```
 ## 4. 项目定位
