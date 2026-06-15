@@ -1,4 +1,3 @@
-# server/robot_state.py
 from __future__ import annotations
 
 from collections import defaultdict, deque
@@ -40,6 +39,16 @@ EMOTION_COLOR = {
     "no_face": "#999999",
 }
 
+# 第 3 页统计图、第 4 页建议都按这些时间段汇总。
+# 这里按“稳定情绪事件发生时刻”归类，不统计 neutral/no_face。
+TIME_PERIODS = [
+    {"key": "night", "name": "凌晨", "range": "00:00-06:00", "start": 0, "end": 6},
+    {"key": "morning", "name": "上午", "range": "06:00-12:00", "start": 6, "end": 12},
+    {"key": "noon", "name": "中午", "range": "12:00-14:00", "start": 12, "end": 14},
+    {"key": "afternoon", "name": "下午", "range": "14:00-18:00", "start": 14, "end": 18},
+    {"key": "evening", "name": "晚上", "range": "18:00-24:00", "start": 18, "end": 24},
+]
+
 
 class RobotState:
     """板端统一状态中心。
@@ -47,6 +56,8 @@ class RobotState:
     注意：
     - 当前情绪状态会实时更新，用于首页展示。
     - 情绪统计只统计明显的非 neutral 情绪。
+    - 第 3 页新增按时间段统计图。
+    - 第 4 页新增按时间段生成建议。
     - App 端只展示这里的统计结果，不再自己二次计数。
     """
 
@@ -63,6 +74,11 @@ class RobotState:
         # 情绪统计，给 WebSocket stats 使用
         self.emotion_counts = defaultdict(int)
         self.total_count = 0
+
+        # 新增：稳定情绪事件日志。
+        # 每次 _try_count_emotion 真正 +1 时，才记录一条。
+        # 第 3 页的分时段图、第 4 页的分时段建议都从这里生成。
+        self.emotion_events = deque(maxlen=500)
 
         # 统计策略：neutral/no_face 不计入；非平静情绪稳定一段时间后才算 1 次。
         self.stats_ignore = {"no_face", "neutral"}
@@ -82,6 +98,9 @@ class RobotState:
 
     def now_time(self):
         return datetime.now().strftime("%H:%M:%S")
+
+    def now_date(self):
+        return datetime.now().strftime("%Y-%m-%d")
 
     def _normalize_emotion(self, emotion):
         if not emotion:
@@ -106,11 +125,39 @@ class RobotState:
 
         return max(0, min(100, confidence))
 
+    def _get_period_info(self, dt=None):
+        dt = dt or datetime.now()
+        hour = dt.hour
+
+        for item in TIME_PERIODS:
+            if item["start"] <= hour < item["end"]:
+                return item
+
+        return TIME_PERIODS[-1]
+
     def _reset_stats_candidate(self):
         self.stats_candidate_emotion = None
         self.stats_candidate_frames = 0
         self.stats_candidate_start_time = 0.0
         self.stats_active_emotion = None
+
+    def _record_emotion_event(self, emotion, confidence, now_ts):
+        """记录一次已经通过稳定判断的情绪事件。"""
+        dt = datetime.now()
+        period = self._get_period_info(dt)
+
+        self.emotion_events.append({
+            "emotion": emotion,
+            "emotion_cn": EMOTION_CN.get(emotion, emotion),
+            "confidence": confidence,
+            "timestamp": now_ts,
+            "date": dt.strftime("%Y-%m-%d"),
+            "time": dt.strftime("%H:%M:%S"),
+            "period_key": period["key"],
+            "period_name": period["name"],
+            "period_range": period["range"],
+            "color": EMOTION_COLOR.get(emotion, "#4f7cff"),
+        })
 
     def _try_count_emotion(self, emotion, confidence, now):
         """只把稳定的非平静情绪记为一次情绪事件。
@@ -156,6 +203,7 @@ class RobotState:
         self.total_count += 1
         self.stats_active_emotion = emotion
         self.stats_last_count_time_by_emotion[emotion] = now
+        self._record_emotion_event(emotion, confidence, now)
 
         return {
             "emotion": emotion,
@@ -225,16 +273,88 @@ class RobotState:
         with self.lock:
             return list(self.chat_history)
 
+    def _make_items_from_counts(self, counts, total):
+        if total <= 0:
+            return []
+
+        sorted_items = sorted(
+            counts.items(),
+            key=lambda x: x[1],
+            reverse=True,
+        )
+
+        items = []
+        for emotion, count in sorted_items:
+            percent = int(round(count * 100 / total))
+            items.append({
+                "name": EMOTION_CN.get(emotion, emotion),
+                "key": emotion,
+                "count": count,
+                "percent": percent,
+                "color": EMOTION_COLOR.get(emotion, "#4f7cff"),
+            })
+
+        return items
+
+    def _build_period_stats_locked(self):
+        period_map = {}
+        for period in TIME_PERIODS:
+            period_map[period["key"]] = {
+                "key": period["key"],
+                "name": period["name"],
+                "range": period["range"],
+                "total": 0,
+                "counts": defaultdict(int),
+            }
+
+        for event in self.emotion_events:
+            period_key = event.get("period_key")
+            emotion = event.get("emotion")
+            if period_key not in period_map:
+                continue
+            if emotion in self.stats_ignore:
+                continue
+
+            period_map[period_key]["total"] += 1
+            period_map[period_key]["counts"][emotion] += 1
+
+        result = []
+        for period in TIME_PERIODS:
+            item = period_map[period["key"]]
+            total = item["total"]
+            emotion_items = self._make_items_from_counts(item["counts"], total)
+            main_emotion_key = emotion_items[0]["key"] if emotion_items else ""
+            main_emotion = emotion_items[0]["name"] if emotion_items else "暂无"
+
+            result.append({
+                "key": item["key"],
+                "name": item["name"],
+                "range": item["range"],
+                "total": total,
+                "main_emotion": main_emotion,
+                "mainEmotion": main_emotion,
+                "main_emotion_key": main_emotion_key,
+                "mainEmotionKey": main_emotion_key,
+                "items": emotion_items,
+                "segments": emotion_items,
+            })
+
+        return result
+
     def get_stats(self):
         with self.lock:
             total = self.total_count
+            period_stats = self._build_period_stats_locked()
 
             if total == 0:
                 return {
                     "total": 0,
                     "main_emotion": "暂无数据",
+                    "mainEmotion": "暂无数据",
                     "trend": "当前还没有足够的非平静情绪数据。",
                     "items": [],
+                    "period_stats": period_stats,
+                    "periodStats": period_stats,
                 }
 
             sorted_items = sorted(
@@ -244,22 +364,16 @@ class RobotState:
             )
 
             main_emotion = sorted_items[0][0]
-            items = []
-            for emotion, count in sorted_items:
-                percent = int(round(count * 100 / total))
-                items.append({
-                    "name": EMOTION_CN.get(emotion, emotion),
-                    "key": emotion,
-                    "count": count,
-                    "percent": percent,
-                    "color": EMOTION_COLOR.get(emotion, "#4f7cff"),
-                })
+            items = self._make_items_from_counts(self.emotion_counts, total)
 
             return {
                 "total": total,
                 "main_emotion": EMOTION_CN.get(main_emotion, main_emotion),
+                "mainEmotion": EMOTION_CN.get(main_emotion, main_emotion),
                 "trend": self._make_trend_text(main_emotion),
                 "items": items,
+                "period_stats": period_stats,
+                "periodStats": period_stats,
             }
 
     def _make_trend_text(self, main_emotion):
@@ -277,62 +391,132 @@ class RobotState:
             return "最近厌恶情绪较明显，建议检查当前环境或交流内容是否让用户不适。"
         return "最近出现了非平静情绪波动，建议继续观察。"
 
-    def get_alerts(self):
-        with self.lock:
-            status = self.current_emotion
-            confidence = self.confidence
+    def _make_period_suggestion(self, period_name, period_range, main_emotion, total):
+        """按时间段生成面向用户本人的建议。
 
-        if status == "sad":
-            return [{
+        注意：小程序是给用户看的，不是给机器人管理者看的。
+        所以这里统一使用“您可以……”的表达，避免出现
+        “建议机器人降低音量 / 减少打扰”这类机器人视角的话。
+        """
+        emotion_cn = EMOTION_CN.get(main_emotion, main_emotion)
+        prefix = f"{period_name}（{period_range}）共记录 {total} 次明显情绪，"
+
+        if main_emotion == "happy":
+            return {
+                "level": "normal",
+                "tag": "积极时段",
+                "title": f"{period_name}开心情绪比较多",
+                "content": f"{prefix}其中开心情绪比较多。您可以把开心的事情分享给家人或朋友，也可以和我聊聊，把这份好心情记录下来。",
+            }
+
+        if main_emotion == "sad":
+            return {
                 "level": "warning",
-                "tag": "需要关注",
-                "title": "检测到难过情绪",
-                "content": "建议使用温和语气陪伴用户，可以播放舒缓音乐或提醒用户休息。",
-            }]
+                "tag": "需要陪伴",
+                "title": f"{period_name}难过情绪比较多",
+                "content": f"{prefix}其中难过情绪比较多。您可以先放慢节奏，听一会儿舒缓的音乐，或者把心里的事慢慢说出来，我会陪您听。",
+            }
 
-        if status == "angry":
-            return [{
+        if main_emotion == "angry":
+            return {
                 "level": "danger",
                 "tag": "情绪波动",
-                "title": "检测到生气情绪",
-                "content": "建议降低机器人音量，减少主动打扰，等待用户情绪稳定。",
-            }]
+                "title": f"{period_name}生气情绪比较多",
+                "content": f"{prefix}其中生气情绪比较多。您可以先暂停争论或复杂任务，做几次深呼吸，等情绪缓和后再处理事情，也可以把让您不舒服的原因说给我听。",
+            }
 
-        if status == "fear":
-            return [{
+        if main_emotion == "surprise":
+            return {
+                "level": "tip",
+                "tag": "值得记录",
+                "title": f"{period_name}惊讶情绪比较多",
+                "content": f"{prefix}其中惊讶情绪比较多。您可以回想一下这个时间段发生了什么新鲜或意外的事情，把它记录下来，或者和我聊聊当时的感受。",
+            }
+
+        if main_emotion == "fear":
+            return {
                 "level": "warning",
-                "tag": "需要安抚",
-                "title": "检测到害怕情绪",
-                "content": "建议机器人使用安抚性话术，并保持陪伴状态。",
-            }]
+                "tag": "需要安心",
+                "title": f"{period_name}害怕情绪比较多",
+                "content": f"{prefix}其中害怕情绪比较多。您可以先待在更熟悉、更安静的环境里，打开灯或联系信任的人，也可以告诉我让您不安的事情。",
+            }
 
-        if status == "disgust":
-            return [{
+        if main_emotion == "disgust":
+            return {
                 "level": "warning",
                 "tag": "需要调整",
-                "title": "检测到厌恶情绪",
-                "content": "建议检查当前声音、画面、环境或对话内容，减少可能引起用户反感的刺激。",
-            }]
+                "title": f"{period_name}厌恶情绪比较多",
+                "content": f"{prefix}其中厌恶情绪比较多。您可以先远离让自己不舒服的内容或环境，换一个更轻松的活动，也可以和我说说哪里让您感到反感。",
+            }
 
-        if status == "no_face":
-            return [{
-                "level": "normal",
-                "tag": "等待检测",
-                "title": "暂未检测到人脸",
-                "content": "请确认摄像头朝向、距离和光照环境是否正常。",
-            }]
+        return {
+            "level": "normal",
+            "tag": "建议观察",
+            "title": f"{period_name}{emotion_cn}情绪比较多",
+            "content": f"{prefix}主要为{emotion_cn}情绪。您可以留意这个时间段通常发生了什么，也可以把当时的感受记录下来，方便之后更了解自己的情绪变化。",
+        }
+
+    def get_alerts(self):
+        """第 4 页：按时间段给出建议，不再按当前表情直接给建议。"""
+        with self.lock:
+            period_stats = self._build_period_stats_locked()
+
+        alerts = []
+        for period in period_stats:
+            total = int(period.get("total", 0))
+            if total <= 0:
+                continue
+
+            main_key = period.get("main_emotion_key") or period.get("mainEmotionKey")
+            if not main_key:
+                continue
+
+            suggestion = self._make_period_suggestion(
+                period_name=period.get("name", "当前时间段"),
+                period_range=period.get("range", ""),
+                main_emotion=main_key,
+                total=total,
+            )
+
+            suggestion.update({
+                "periodName": period.get("name", ""),
+                "period_name": period.get("name", ""),
+                "periodRange": period.get("range", ""),
+                "period_range": period.get("range", ""),
+                "total": total,
+                "mainEmotion": EMOTION_CN.get(main_key, main_key),
+                "main_emotion": EMOTION_CN.get(main_key, main_key),
+                "mainEmotionKey": main_key,
+                "main_emotion_key": main_key,
+                "color": EMOTION_COLOR.get(main_key, "#4f7cff"),
+            })
+            alerts.append(suggestion)
+
+        if alerts:
+            return alerts
 
         return [{
             "level": "normal",
-            "tag": "状态良好",
-            "title": "当前情绪状态较稳定",
-            "content": f"当前情绪识别置信度为 {confidence}%，可以保持正常交流。",
+            "tag": "数据不足",
+            "title": "暂无分时段关怀建议",
+            "content": "当前还没有形成稳定的非平静情绪统计。等待板端识别到开心、生气、难过、惊讶等明显情绪后，这里会按时间段给出建议。",
+            "periodName": "全时段",
+            "period_name": "全时段",
+            "periodRange": "00:00-24:00",
+            "period_range": "00:00-24:00",
+            "total": 0,
+            "mainEmotion": "暂无",
+            "main_emotion": "暂无",
+            "mainEmotionKey": "unknown",
+            "main_emotion_key": "unknown",
+            "color": "#8A8F99",
         }]
 
     def reset_stats(self):
         with self.lock:
             self.emotion_counts.clear()
             self.total_count = 0
+            self.emotion_events.clear()
             self.stats_last_count_time_by_emotion.clear()
             self._reset_stats_candidate()
 

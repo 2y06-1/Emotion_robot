@@ -63,17 +63,24 @@ def make_chat_data():
 def make_stats_data():
     """把统计结果转换成小程序 emotion 页面使用的数据结构。"""
     stats = robot_state.get_stats()
+    period_stats = stats.get("periodStats") or stats.get("period_stats") or []
 
     return {
         "total": stats.get("total", 0),
-        "mainEmotion": stats.get("main_emotion", "暂无数据"),
+        "mainEmotion": stats.get("mainEmotion") or stats.get("main_emotion", "暂无数据"),
         "trend": stats.get("trend", "当前还没有足够的情绪数据。"),
         "items": stats.get("items", []),
+        # 第 3 个界面新增：按时间段统计图使用这个字段。
+        "periodStats": period_stats,
     }
 
 
 def make_alerts_data():
-    """把提醒建议转换成小程序 alert 页面使用的数据结构。"""
+    """把提醒建议转换成小程序 alert 页面使用的数据结构。
+
+    现在 alert 页面展示的是“分时段建议”，不是“当前表情建议”。
+    具体建议由 robot_state.get_alerts() 统一生成。
+    """
     return robot_state.get_alerts()
 
 
@@ -198,6 +205,7 @@ async def handle_client_message(websocket, raw_message):
         robot_state.reset_stats()
         await send_message(websocket, "stats", make_stats_data())
         await broadcast("stats", make_stats_data())
+        await broadcast("alerts", make_alerts_data())
         return
 
     # 可选：以后如果你想在小程序端发送文字给板子，就用这个消息。
