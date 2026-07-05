@@ -51,14 +51,8 @@ TIME_PERIODS = [
 
 
 class RobotState:
-    """板端统一状态中心。
-
-    注意：
-    - 当前情绪状态会实时更新，用于首页展示。
-    - 情绪统计只统计明显的非 neutral 情绪。
-    - 第 3 页新增按时间段统计图。
-    - 第 4 页新增按时间段生成建议。
-    - App 端只展示这里的统计结果，不再自己二次计数。
+    """
+    板端统一状态中心。
     """
 
     def __init__(self):
@@ -74,10 +68,6 @@ class RobotState:
         # 情绪统计，给 WebSocket stats 使用
         self.emotion_counts = defaultdict(int)
         self.total_count = 0
-
-        # 新增：稳定情绪事件日志。
-        # 每次 _try_count_emotion 真正 +1 时，才记录一条。
-        # 第 3 页的分时段图、第 4 页的分时段建议都从这里生成。
         self.emotion_events = deque(maxlen=500)
 
         # 统计策略：neutral/no_face 不计入；非平静情绪稳定一段时间后才算 1 次。
@@ -160,18 +150,8 @@ class RobotState:
         })
 
     def _try_count_emotion(self, emotion, confidence, now):
-        """只把稳定的非平静情绪记为一次情绪事件。
-
-        返回值：
-        - None：这次没有形成新的统计事件。
-        - dict：这次形成了新的统计事件，main.py 可以据此播报/提示。
-
-        规则：
-        1. neutral 不统计，因为平静本来就会最多。
-        2. no_face 不统计。
-        3. 低置信度不统计。
-        4. 同一种非平静情绪连续稳定一段时间后才 +1。
-        5. 同一次连续情绪只记一次，不会每帧狂加。
+        """
+        只把稳定的非平静情绪记为一次情绪事件。
         """
         if emotion in self.stats_ignore or confidence < self.stats_min_confidence:
             self._reset_stats_candidate()
@@ -216,7 +196,7 @@ class RobotState:
 
     def update_emotion(self, emotion, confidence=0, face_detected=True):
         """
-        emotion: happy / angry / neutral / sad / surprise / fear / disgust / no_face
+        emotion: happy / angry / neutral / sad / surprise / no_face
         confidence: 可以是 0.92，也可以是 92
         face_detected: 是否检测到人脸
         """
@@ -392,11 +372,8 @@ class RobotState:
         return "最近出现了非平静情绪波动，建议继续观察。"
 
     def _make_period_suggestion(self, period_name, period_range, main_emotion, total):
-        """按时间段生成面向用户本人的建议。
-
-        注意：小程序是给用户看的，不是给机器人管理者看的。
-        所以这里统一使用“您可以……”的表达，避免出现
-        “建议机器人降低音量 / 减少打扰”这类机器人视角的话。
+        """
+        按时间段生成面向用户本人的建议。
         """
         emotion_cn = EMOTION_CN.get(main_emotion, main_emotion)
         prefix = f"{period_name}（{period_range}）共记录 {total} 次明显情绪，"

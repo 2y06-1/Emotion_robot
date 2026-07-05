@@ -76,10 +76,8 @@ def make_stats_data():
 
 
 def make_alerts_data():
-    """把提醒建议转换成小程序 alert 页面使用的数据结构。
-
-    现在 alert 页面展示的是“分时段建议”，不是“当前表情建议”。
-    具体建议由 robot_state.get_alerts() 统一生成。
+    """
+    把提醒建议转换成小程序 alert 页面使用的数据结构。
     """
     return robot_state.get_alerts()
 
@@ -130,10 +128,9 @@ async def broadcast(msg_type, data):
 
 
 async def broadcast_loop(push_interval=1.0):
-    """定时推送数据给小程序。
-
+    """
+    定时推送数据给小程序。
     这里采用 WebSocket 长连接 + 定时推送。
-    好处是 main.py 里原有的情绪识别代码不用大改：
     robot_state.update_emotion() 继续负责更新状态，
     WebSocket 服务每隔一段时间从 robot_state 读取最新状态并推送给小程序。
     """
