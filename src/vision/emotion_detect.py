@@ -36,7 +36,6 @@ def make_onnx_session(model_path: str, provider: str, threads: int) -> ort.Infer
         providers=providers,
     )
 
-
 class EmotionClassifier:
     """
     表情分类模块。
@@ -127,8 +126,6 @@ class EmotionClassifier:
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         img = img.astype(np.float32) / 255.0
 
-        # Ultralytics 分类默认使用 ImageNet mean/std。
-        # 如果你导出/训练时确认没有 Normalize，可在 config.json 改成 mean=[0,0,0], std=[1,1,1] 对比测试。
         img = (img - self.mean) / self.std
 
         img = img.transpose(2, 0, 1).astype(np.float32)
@@ -138,7 +135,6 @@ class EmotionClassifier:
         out = np.asarray(raw_output)
         out = np.squeeze(out)
 
-        # 防止某些模型输出多维，统一拉平成一维类别向量。
         if out.ndim != 1:
             out = out.reshape(-1)
 

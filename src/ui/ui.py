@@ -62,7 +62,6 @@ class RobotEyesWidget(QWidget):
         h = self.height()
         painter.fillRect(self.rect(), QColor(0, 0, 0))
 
-        # 柔和环境光，和聊天页风格统一。
         glow = QRadialGradient(w * 0.5, h * 0.36, min(w, h) * 0.58)
         glow.setColorAt(0.0, QColor(0, 135, 210, 28))
         glow.setColorAt(0.58, QColor(0, 45, 95, 9))
@@ -237,9 +236,6 @@ class MainWindow(QWidget):
     1. 机器人动态表情页
     2. 极简聊天页
     3. 用户表情检测页
-
-    注意：聊天页已经删除“退出程序”按钮。
-    exit_program_clicked 信号仍然保留，ESC 或关闭窗口时会触发，方便调试退出。
     """
 
     record_button_clicked = pyqtSignal()
@@ -650,7 +646,6 @@ class MainWindow(QWidget):
                 continue
 
             if widget is self.empty_hint_label:
-                # 空提示只隐藏，不销毁，后面还要重新加入布局。
                 widget.hide()
                 widget.setParent(self.chat_content)
             else:
@@ -735,7 +730,6 @@ class MainWindow(QWidget):
             else:
                 widget.deleteLater()
 
-        # 底部 stretch 用于把消息自然推到上方，并保证 insertWidget(count - 1) 有位置。
         self.chat_layout.addStretch(1)
 
     def _scroll_chat_to_bottom(self):
@@ -746,7 +740,6 @@ class MainWindow(QWidget):
 
     # ---------- 退出逻辑 ----------
     def closeEvent(self, event):
-        # 没有界面退出按钮，但关闭窗口仍然会走 main.py 的安全退出逻辑。
         self.exit_program_clicked.emit()
         event.accept()
 
