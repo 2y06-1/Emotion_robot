@@ -5,11 +5,9 @@ from pathlib import Path
 class AppConfig:
     """
     配置读取层。
-
     规则：
     - config.json 只存配置数据。
-    - config.py 只负责读取 json，并把配置整理成 main.py 好调用的属性。
-    - 功能模块不读取 config.json，也不写死真实路径。
+    - config.py 只负责读取 json，并把配置整理成 main.py 好调用的属性。。
     """
 
     def __init__(self, config_path=None):
