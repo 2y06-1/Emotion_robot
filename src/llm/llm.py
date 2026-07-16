@@ -1,20 +1,104 @@
+import html
 import json
 import re
-import html
+import unicodedata
 from pathlib import Path
 
 import requests
 
 
 class Ollama_chat:
-    """Ollama 对话模块。"""
+    """Ollama 情绪共情对话模块。"""
 
-    def __init__(self, base_url, model_name, txt_path, stream, timeout):
+    EMOTION_CN = {
+        "happy": "开心",
+        "angry": "生气",
+        "sad": "难过",
+        "surprise": "惊讶",
+        "neutral": "平静",
+        "no_face": "未知",
+    }
+
+    FALLBACK_REPLIES = {
+        "happy": [
+            "这份开心真好，我也替你高兴。",
+            "你的喜悦很珍贵，愿快乐常伴你。",
+        ],
+        "angry": [
+            "这确实让人窝火，我理解你的感受。",
+            "受了这样的委屈，生气也很正常。",
+        ],
+        "sad": [
+            "今天确实很难熬，我会陪着你。",
+            "你的难过我听见了，我会陪着你。",
+        ],
+        "surprise": [
+            "这份惊喜太棒了，我也替你开心。",
+            "这确实让人惊讶，我懂你的感受。",
+        ],
+        "neutral": [
+            "今天就好好休息，让自己慢慢放松。",
+            "你的感受很重要，我会认真听着。",
+        ],
+        "no_face": [
+            "最近确实辛苦了，我会陪着你。",
+            "你的感受很重要，我会认真听着。",
+        ],
+    }
+
+    # 这些词出现在句尾，通常说明句子还没有说完。
+    INCOMPLETE_ENDINGS = (
+        "但",
+        "但是",
+        "不过",
+        "而且",
+        "因为",
+        "所以",
+        "因此",
+        "然后",
+        "同时",
+        "或者",
+        "以及",
+        "并且",
+        "可是",
+        "却",
+        "请",
+        "希望",
+        "希望你",
+        "希望你会",
+        "一个",
+        "一种",
+        "一些",
+        "这样的",
+        "美好的",
+        "更好的",
+        "的",
+        "地",
+        "得",
+        "和",
+        "与",
+        "或",
+        "把",
+        "被",
+        "给",
+        "让",
+        "向",
+        "对",
+    )
+
+    def __init__(
+        self,
+        base_url,
+        model_name,
+        txt_path,
+        stream=True,
+        timeout=120,
+    ):
         self.base_url = str(base_url).rstrip("/")
         self.model_name = str(model_name)
         self.txt_path = Path(txt_path)
         self.stream = bool(stream)
-        self.timeout = None if timeout is None else float(timeout)
+        self.timeout = 120 if timeout is None else float(timeout)
 
         self.api_url = f"{self.base_url}/api/chat"
         self.history = []
@@ -22,127 +106,396 @@ class Ollama_chat:
         self.txt_path.parent.mkdir(parents=True, exist_ok=True)
         self.txt_path.touch(exist_ok=True)
 
-    def history_append(self, role, content):
-        self.history.append({"role": role, "content": content})
+    # =========================================================
+    # 对话历史
+    # =========================================================
 
-        with open(self.txt_path, "a", encoding="utf-8") as f:
-            f.write(f"{role}: {content}\n")
+    def history_append(self, role, content):
+        message = {
+            "role": str(role),
+            "content": str(content),
+        }
+
+        self.history.append(message)
+
+        # 最多保留最近6轮，避免小模型被长历史干扰。
+        if len(self.history) > 12:
+            self.history = self.history[-12:]
+
+        with open(self.txt_path, "a", encoding="utf-8") as file:
+            file.write(f"{role}: {content}\n")
+
+    def history_clear(self):
+        self.history = []
+
+        with open(self.txt_path, "w", encoding="utf-8") as file:
+            file.truncate(0)
+
+        print("对话历史已清空", flush=True)
+
+    def history_show(self):
+        for message in self.history:
+            role = message.get("role", "")
+            content = message.get("content", "")
+            print(f"{role}: {content}", flush=True)
+
+    # =========================================================
+    # 主对话接口
+    # =========================================================
 
     def chat_ollama(self, user_message, system_prompt=None):
-        """发送对话给 Ollama。
-
-        user_message：用户真正说的话。
-        system_prompt：机器人身份、情绪策略等系统提示。
-
-        关键点：不要把长 Prompt 当 user_message 发送，否则本地模型容易把 Prompt 原样复述。
-        """
         user_message = str(user_message or "").strip()
         system_prompt = str(system_prompt or "").strip()
 
-        messages = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        messages.extend(self.history)
-        messages.append({"role": "user", "content": user_message})
+        emotion = self._infer_emotion(system_prompt)
 
+        messages = []
+
+        if system_prompt:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": system_prompt,
+                }
+            )
+
+        # 只发送最近3轮历史。
+        messages.extend(self.history[-6:])
+
+        messages.append(
+            {
+                "role": "user",
+                "content": user_message,
+            }
+        )
+
+        # 第一次正常生成。
+        raw_reply = self._request_model(
+            messages=messages,
+            temperature=0.25,
+            num_predict=64,
+        )
+
+        reply = self._clean_reply(raw_reply)
+
+        # 回复过长、过短或句子残缺时，再压缩重写一次。
+        if not reply:
+            print(
+                f"[LLM] 首次回复不合格，尝试压缩重写：{raw_reply}",
+                flush=True,
+            )
+
+            repair_raw_reply = self._repair_reply(
+                draft=raw_reply,
+                emotion=emotion,
+                user_message=user_message,
+            )
+
+            reply = self._clean_reply(repair_raw_reply)
+
+        # 第二次仍不合格，使用完整兜底句。
+        if not reply:
+            reply = self._fallback_reply(
+                emotion=emotion,
+                user_message=user_message,
+            )
+
+            print(
+                f"[LLM] 使用情绪兜底回复：{reply}",
+                flush=True,
+            )
+
+        print(f"{self.model_name} > {reply}", flush=True)
+
+        self.history_append("user", user_message)
+        self.history_append("assistant", reply)
+
+        return reply
+
+    # =========================================================
+    # Ollama 请求
+    # =========================================================
+
+    def _request_model(
+        self,
+        messages,
+        temperature=0.25,
+        num_predict=64,
+    ):
         payload = {
             "model": self.model_name,
             "messages": messages,
             "stream": self.stream,
+            "options": {
+                "temperature": temperature,
+                "top_p": 0.70,
+                "top_k": 20,
+                "repeat_penalty": 1.12,
+                # 这里限制的是token，不是汉字数量。
+                # 必须给足空间，让模型先生成完整句子。
+                "num_predict": num_predict,
+                "num_ctx": 2048,
+            },
         }
 
         response = requests.post(
             self.api_url,
             json=payload,
             stream=self.stream,
-            timeout=self.timeout,
+            timeout=(5, self.timeout),
         )
+
         response.raise_for_status()
 
-        print(f"{self.model_name} > ", end="", flush=True)
+        if self.stream:
+            return self._read_stream_response(response)
 
-        if not self.stream:
-            data = response.json()
-            reply = data.get("message", {}).get("content", "")
-            reply = self._clean_reply(reply)
-            print(reply, flush=True)
-            self.history_append("user", user_message)
-            self.history_append("assistant", reply)
-            return reply
+        data = response.json()
+        return data.get("message", {}).get("content", "")
 
-        full_reply = ""
-        in_think = False
-        buffer = ""
+    @staticmethod
+    def _read_stream_response(response):
+        full_reply = []
 
         for line in response.iter_lines():
             if not line:
                 continue
 
-            chunk = json.loads(line.decode("utf-8"))
-            content = chunk.get("message", {}).get("content", "")
-            if content:
-                buffer += content
+            try:
+                chunk = json.loads(
+                    line.decode("utf-8")
+                )
+            except (
+                UnicodeDecodeError,
+                json.JSONDecodeError,
+            ):
+                continue
 
-                if not in_think:
-                    think_start = buffer.find("<think>")
-                    if think_start != -1:
-                        part = buffer[:think_start]
-                        if part:
-                            print(part, end="", flush=True)
-                            full_reply += part
-                        in_think = True
-                        buffer = buffer[think_start + len("<think>"):]
-                    else:
-                        print(buffer, end="", flush=True)
-                        full_reply += buffer
-                        buffer = ""
-                else:
-                    think_end = buffer.find("</think>")
-                    if think_end != -1:
-                        part = buffer[think_end + len("</think>"):]
-                        if part:
-                            print(part, end="", flush=True)
-                            full_reply += part
-                        in_think = False
-                        buffer = ""
-                    else:
-                        buffer = ""
+            content = (
+                chunk
+                .get("message", {})
+                .get("content", "")
+            )
+
+            if content:
+                full_reply.append(content)
 
             if chunk.get("done"):
                 break
 
-        full_reply = self._clean_reply(full_reply)
-        print(flush=True)
-        self.history_append("user", user_message)
-        self.history_append("assistant", full_reply)
-        return full_reply
+        return "".join(full_reply)
 
-    def history_clear(self):
-        self.history = []
-        with open(self.txt_path, "w", encoding="utf-8") as f:
-            f.truncate(0)
-        print("对话历史已清空", flush=True)
+    # =========================================================
+    # 超长回复压缩重写
+    # =========================================================
 
-    def history_show(self):
-        for msg in self.history:
-            print(f"{msg['role']}: {msg['content'][:100]}...", flush=True)
+    def _repair_reply(
+        self,
+        draft,
+        emotion,
+        user_message,
+    ):
+        emotion_cn = self.EMOTION_CN.get(
+            emotion,
+            "平静",
+        )
 
-    @staticmethod
-    def _remove_think_content(text):
-        while True:
-            start = text.find("<think>")
-            end = text.find("</think>")
-            if start == -1 or end == -1 or end < start:
-                break
-            text = text[:start] + text[end + len("</think>"):]
-        return text
+        repair_system_prompt = """
+你是中文短句改写器。
+
+你的任务是把原回复改写成一句完整、自然的中文共情回复。
+
+必须遵守：
+1. 只输出改写后的最终句子。
+2. 必须是一句完整的话。
+3. 总长度为10到20个可见字符。
+4. 不得从中间截断句子。
+5. 不得以“但、不过、因为、所以、请、一个、的”等词结尾。
+6. 不反问，不说教，不使用表情符号。
+7. 不输出解释、字数或角色名称。
+""".strip()
+
+        repair_user_prompt = f"""
+用户情绪：{emotion_cn}
+用户原话：{user_message}
+原始回复：{draft}
+
+请将原始回复压缩改写为一句10到20字的完整共情回复。
+""".strip()
+
+        repair_messages = [
+            {
+                "role": "system",
+                "content": repair_system_prompt,
+            },
+            {
+                "role": "user",
+                "content": repair_user_prompt,
+            },
+        ]
+
+        try:
+            return self._request_model(
+                messages=repair_messages,
+                temperature=0.10,
+                num_predict=48,
+            )
+
+        except Exception as exc:
+            print(
+                f"[LLM] 压缩重写失败：{exc}",
+                flush=True,
+            )
+            return ""
+
+    # =========================================================
+    # 回复清洗和完整性检测
+    # =========================================================
 
     @classmethod
     def _clean_reply(cls, text):
-        text = cls._remove_think_content(str(text or "")).strip()
-        text = html.unescape(text).strip()
+        """
+        清洗模型回复。
 
-        # 去掉模型可能输出的外层引号。
+        重要：
+        这里绝对不再使用 text[:20] 强制截断。
+        不合格就返回空字符串，交给重写或兜底处理。
+        """
+
+        text = str(text or "")
+
+        # 删除思考标签。
+        text = re.sub(
+            r"<think>.*?</think>",
+            "",
+            text,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+
+        text = html.unescape(text).strip()
+        text = cls._remove_emojis(text)
+
+        # 删除角色前缀。
+        text = re.sub(
+            r"^(助手|机器人|AI|回复|回答|"
+            r"assistant)\s*[：:]\s*",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        )
+
+        # 删除Markdown列表符号。
+        text = re.sub(
+            r"^\s*[-*•#]+\s*",
+            "",
+            text,
+        )
+
+        # 删除换行和多余空格。
+        text = re.sub(r"\s+", "", text)
+
+        # 反问符号改成句号。
+        text = text.replace("？", "。")
+        text = text.replace("?", "。")
+
+        # 删除外层引号。
+        text = cls._strip_outer_quotes(text)
+
+        if not text:
+            return ""
+
+        forbidden_phrases = [
+            "当前情绪",
+            "情绪识别",
+            "视觉情绪",
+            "通过摄像头",
+            "检测到你",
+            "置信度",
+            "系统提示",
+            "作为一个人工智能",
+            "作为AI",
+            "作为一个AI",
+            "我无法感受",
+            "用户：",
+            "助手：",
+            "回复：",
+        ]
+
+        if any(
+            phrase in text
+            for phrase in forbidden_phrases
+        ):
+            return ""
+
+        # 找出所有已经完整结束的句子。
+        complete_sentences = re.findall(
+            r"[^。！\n]+[。！]",
+            text,
+        )
+
+        # 优先选择第一条长度合格且完整的句子。
+        for sentence in complete_sentences:
+            sentence = sentence.strip()
+
+            if cls._is_valid_sentence(sentence):
+                return sentence
+
+        # 模型有时不输出标点，但内容本身已经完整。
+        if "。" not in text and "！" not in text:
+            candidate = text.strip("，、；：")
+
+            # 加句号之后仍不得超过20字。
+            if len(candidate) <= 19:
+                candidate += "。"
+
+                if cls._is_valid_sentence(candidate):
+                    return candidate
+
+        # 太长、太短或句子残缺，返回空。
+        # 由上层执行压缩重写，而不是强制截断。
+        return ""
+
+    @classmethod
+    def _is_valid_sentence(cls, sentence):
+        sentence = str(sentence or "").strip()
+
+        if not sentence:
+            return False
+
+        length = len(re.sub(r"\s+", "", sentence))
+
+        if not 10 <= length <= 20:
+            return False
+
+        if "\n" in sentence:
+            return False
+
+        if "？" in sentence or "?" in sentence:
+            return False
+
+        if cls._is_incomplete_sentence(sentence):
+            return False
+
+        return True
+
+    @classmethod
+    def _is_incomplete_sentence(cls, sentence):
+        # 先去掉结尾标点。
+        content = sentence.rstrip(
+            "。！？，、；：,.!?"
+        ).strip()
+
+        if not content:
+            return True
+
+        for ending in cls.INCOMPLETE_ENDINGS:
+            if content.endswith(ending):
+                return True
+
+        return False
+
+    @staticmethod
+    def _strip_outer_quotes(text):
         quote_pairs = [
             ('"', '"'),
             ("'", "'"),
@@ -151,25 +504,89 @@ class Ollama_chat:
             ("「", "」"),
             ("『", "』"),
         ]
+
+        text = str(text or "").strip()
         changed = True
+
         while changed and len(text) >= 2:
             changed = False
+
             for left, right in quote_pairs:
-                if text.startswith(left) and text.endswith(right):
+                if (
+                    text.startswith(left)
+                    and text.endswith(right)
+                ):
                     text = text[1:-1].strip()
                     changed = True
+                    break
 
-        # 如果模型仍然把系统提示词开头复述出来，做一个兜底截断。
-        bad_starts = [
-            "你是一个智能情感陪伴机器人",
-            "基本要求：",
-            "当前可靠的视觉情绪信息：",
-            "当前视觉情绪识别结果：",
-        ]
-        if any(text.startswith(s) for s in bad_starts):
-            # 这种回复不可用，返回空，让 main.py 使用兜底句。
-            return ""
-
-        # 去掉 Markdown 列表符号。
-        text = re.sub(r"^\s*[-*•]\s*", "", text).strip()
         return text
+
+    @staticmethod
+    def _remove_emojis(text):
+        result = []
+
+        for char in str(text or ""):
+            code = ord(char)
+            category = unicodedata.category(char)
+
+            if category == "So":
+                continue
+
+            if (
+                0x1F300 <= code <= 0x1FAFF
+                or 0x2600 <= code <= 0x27BF
+            ):
+                continue
+
+            result.append(char)
+
+        return "".join(result)
+
+    # =========================================================
+    # 情绪识别和兜底
+    # =========================================================
+
+    @staticmethod
+    def _infer_emotion(system_prompt):
+        prompt = str(system_prompt or "")
+
+        checks = [
+            ("生气烦躁", "angry"),
+            ("生气", "angry"),
+            ("烦躁", "angry"),
+            ("难过低落", "sad"),
+            ("难过", "sad"),
+            ("低落", "sad"),
+            ("伤心", "sad"),
+            ("开心", "happy"),
+            ("高兴", "happy"),
+            ("惊喜惊讶", "surprise"),
+            ("惊喜", "surprise"),
+            ("惊讶", "surprise"),
+            ("未知", "no_face"),
+        ]
+
+        for keyword, emotion in checks:
+            if keyword in prompt:
+                return emotion
+
+        return "neutral"
+
+    @classmethod
+    def _fallback_reply(
+        cls,
+        emotion="neutral",
+        user_message="",
+    ):
+        if emotion not in cls.FALLBACK_REPLIES:
+            emotion = "neutral"
+
+        replies = cls.FALLBACK_REPLIES[emotion]
+
+        index = (
+            sum(ord(char) for char in str(user_message))
+            % len(replies)
+        )
+
+        return replies[index]
