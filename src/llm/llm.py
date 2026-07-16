@@ -34,6 +34,7 @@ class Ollama_chat:
         user_message：用户真正说的话。
         system_prompt：机器人身份、情绪策略等系统提示。
 
+        关键点：不要把长 Prompt 当 user_message 发送，否则本地模型容易把 Prompt 原样复述。
         """
         user_message = str(user_message or "").strip()
         system_prompt = str(system_prompt or "").strip()
