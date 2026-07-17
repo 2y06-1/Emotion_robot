@@ -154,23 +154,74 @@ class EmotionClassifier:
 
         return probs
 
-    def predict_probs(self, bgr_image: np.ndarray) -> np.ndarray:
+    def predict_probs(self, bgr_image):
+        """
+        输入一张BGR人脸图像，返回所有类别的概率。
+        """
+        input_tensor = self.preprocess(bgr_image)
+
         outputs = self.session.run(
             None,
-            {self.input_name: self.preprocess(bgr_image)},
+            {
+                self.input_name: input_tensor,
+            },
         )
+
         return self._to_probs(outputs[0])
 
-    def predict_topk(self, bgr_image: np.ndarray, top_k=None) -> list[tuple[str, float]]:
+    def predict_topk(self, bgr_image, top_k=None):
+        """
+        返回概率最高的前K个情绪。
+
+        返回格式：
+        [
+            ("happy", 0.82),
+            ("neutral", 0.10),
+            ("surprise", 0.05),
+        ]
+        """
         probs = self.predict_probs(bgr_image)
-        k = self.top_k if top_k is None else int(top_k)
-        k = max(1, min(k, len(self.class_names), len(probs)))
+
+        if top_k is None:
+            k = self.top_k
+        else:
+            k = int(top_k)
+
+        k = max(
+            1,
+            min(
+                k,
+                len(self.class_names),
+                len(probs),
+            ),
+        )
 
         indices = np.argsort(probs)[::-1][:k]
-        return [
-            (self.class_names[int(i)], float(probs[int(i)]))
-            for i in indices
-        ]
 
-    def predict(self, bgr_image: np.ndarray) -> tuple[str, float]:
-        return self.predict_topk(bgr_image, top_k=1)[0]
+        results = []
+
+        for index in indices:
+            index = int(index)
+
+            results.append(
+                (
+                    self.class_names[index],
+                    float(probs[index]),
+                )
+            )
+
+        return results
+
+    def predict(self, bgr_image):
+        """
+        返回概率最高的一个情绪。
+
+        返回格式：
+        ("happy", 0.82)
+        """
+        top1 = self.predict_topk(
+            bgr_image,
+            top_k=1,
+        )
+
+        return top1[0]

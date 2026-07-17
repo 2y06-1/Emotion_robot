@@ -363,7 +363,7 @@ class Ollama_chat:
 必须遵守：
 1. 只输出改写后的最终句子。
 2. 必须是一句完整的话。
-3. 总长度为10到30个可见字符。
+3. 总长度为8到30个可见字符。
 4. 不得从中间截断句子。
 5. 不得以“但、不过、因为、所以、请、一个、的”等词结尾。
 6. 可以自然提问，但不要连续追问或给用户压力。
@@ -529,7 +529,7 @@ class Ollama_chat:
 
         length = len(re.sub(r"\s+", "", sentence))
 
-        if not 10 <= length <= 30:
+        if not 8 <= length <= 30:
             return False
 
         if "\n" in sentence:

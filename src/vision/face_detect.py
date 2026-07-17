@@ -132,30 +132,98 @@ class Face_Detect:
         return self.nms(boxes, iou_threshold=iou_threshold)
 
     def crop(self, frame, boxes, pad, extra_ratio):
+        """
+        根据人脸框裁剪正方形人脸ROI。
+
+        与原版本相比：
+        1. 减少背景区域；
+        2. 保证ROI为正方形；
+        3. 避免情绪模型将长方形人脸强行拉伸为正方形；
+        4. 保留完整的额头、眼睛和嘴部。
+        """
         faces = []
+
         if frame is None:
             return faces
 
         pad = int(pad)
         extra_ratio = float(extra_ratio)
-        h, w = frame.shape[:2]
 
-        for (x1, y1, x2, y2, conf) in boxes:
-            x1p = max(0, int(x1) - pad)
-            y1p = max(0, int(y1) - pad)
-            x2p = min(w, int(x2) + pad)
-            y2p = min(h, int(y2) + pad)
+        frame_h, frame_w = frame.shape[:2]
 
-            extra = int(max(x2p - x1p, y2p - y1p) * extra_ratio)
-            x1p = max(0, x1p - extra)
-            y1p = max(0, y1p - extra)
-            x2p = min(w, x2p + extra)
-            y2p = min(h, y2p + extra)
+        for x1, y1, x2, y2, conf in boxes:
+            x1 = int(x1)
+            y1 = int(y1)
+            x2 = int(x2)
+            y2 = int(y2)
 
-            face = frame[y1p:y2p, x1p:x2p]
+            box_w = max(1, x2 - x1)
+            box_h = max(1, y2 - y1)
+
+            # 使用人脸框中心。
+            center_x = (x1 + x2) / 2.0
+            center_y = (y1 + y2) / 2.0
+
+            # 取宽高中较大的值，构造正方形。
+            base_size = max(box_w, box_h)
+
+            # pad作为固定像素扩张，extra_ratio作为比例扩张。
+            side_length = int(
+                base_size * (1.0 + 2.0 * extra_ratio)
+                + 2 * pad
+            )
+
+            side_length = max(side_length, 1)
+
+            half = side_length / 2.0
+
+            square_x1 = int(round(center_x - half))
+            square_y1 = int(round(center_y - half))
+            square_x2 = square_x1 + side_length
+            square_y2 = square_y1 + side_length
+
+            # 如果正方形超出图像范围，整体平移回来，
+            # 而不是直接单边截断导致重新变成长方形。
+            if square_x1 < 0:
+                square_x2 -= square_x1
+                square_x1 = 0
+
+            if square_y1 < 0:
+                square_y2 -= square_y1
+                square_y1 = 0
+
+            if square_x2 > frame_w:
+                shift = square_x2 - frame_w
+                square_x1 -= shift
+                square_x2 = frame_w
+
+            if square_y2 > frame_h:
+                shift = square_y2 - frame_h
+                square_y1 -= shift
+                square_y2 = frame_h
+
+            square_x1 = max(0, square_x1)
+            square_y1 = max(0, square_y1)
+            square_x2 = min(frame_w, square_x2)
+            square_y2 = min(frame_h, square_y2)
+
+            face = frame[
+                square_y1:square_y2,
+                square_x1:square_x2,
+            ]
+
             if face.size == 0:
                 continue
 
-            faces.append((x1p, y1p, x2p, y2p, conf, face))
+            faces.append(
+                (
+                    square_x1,
+                    square_y1,
+                    square_x2,
+                    square_y2,
+                    conf,
+                    face,
+                )
+            )
 
         return faces
