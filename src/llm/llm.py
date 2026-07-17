@@ -1,5 +1,6 @@
 import html
 import json
+import random
 import re
 import unicodedata
 from pathlib import Path
@@ -17,6 +18,45 @@ class Ollama_chat:
         "surprise": "惊讶",
         "neutral": "平静",
         "no_face": "未知",
+    }
+
+    EMOTION_STATUS_REPLIES = {
+        "happy": [
+            "你现在看起来心情挺开心的。",
+            "你现在的情绪比较轻松愉快。",
+            "我感觉你现在心情很不错。",
+            "你此刻看起来比较开心。",
+        ],
+        "angry": [
+            "你现在的情绪是烦躁和生气。",
+            "你现在看起来有些生气和烦躁。",
+            "我感觉你此刻有些烦躁。",
+            "你现在似乎有点生气。",
+        ],
+        "sad": [
+            "你现在看起来有些难过。",
+            "我感觉你此刻的心情有些低落。",
+            "你现在的情绪似乎比较低落。",
+            "你此刻看起来不太开心。",
+        ],
+        "surprise": [
+            "你现在看起来有些惊讶。",
+            "我感觉你此刻有些惊喜和意外。",
+            "你现在的情绪似乎比较惊讶。",
+            "你此刻看起来有些意外。",
+        ],
+        "neutral": [
+            "你现在的情绪看起来比较平静。",
+            "我感觉你此刻的状态比较平稳。",
+            "你现在看起来心情比较平静。",
+            "你此刻的情绪没有明显波动。",
+        ],
+        "no_face": [
+            "我现在还无法判断你的心情。",
+            "我暂时还不能准确判断你的情绪。",
+            "目前的信息不足以判断你的心情。",
+            "我现在无法准确判断你的情绪。",
+        ],
     }
 
     FALLBACK_REPLIES = {
@@ -99,9 +139,12 @@ class Ollama_chat:
         self.txt_path = Path(txt_path)
         self.stream = bool(stream)
         self.timeout = 120 if timeout is None else float(timeout)
-
         self.api_url = f"{self.base_url}/api/chat"
         self.history = []
+
+        # 记录每种情绪上一次使用的状态回复，
+        # 随机选择时尽量避免连续说同一句。
+        self._last_emotion_status_reply = {}
 
         self.txt_path.parent.mkdir(parents=True, exist_ok=True)
         self.txt_path.touch(exist_ok=True)
@@ -115,7 +158,6 @@ class Ollama_chat:
             "role": str(role),
             "content": str(content),
         }
-
         self.history.append(message)
 
         # 最多保留最近6轮，避免小模型被长历史干扰。
@@ -149,6 +191,21 @@ class Ollama_chat:
 
         emotion = self._infer_emotion(system_prompt)
 
+        # 用户明确询问自己当前的心情、情绪或表情时，
+        # 直接根据本轮视觉状态回答，不让历史对话干扰判断。
+        direct_reply = self._direct_emotion_status_reply(
+            user_message=user_message,
+            emotion=emotion,
+        )
+
+        if direct_reply:
+            print(f"{self.model_name} > {direct_reply}", flush=True)
+
+            self.history_append("user", user_message)
+            self.history_append("assistant", direct_reply)
+
+            return direct_reply
+
         messages = []
 
         if system_prompt:
@@ -175,7 +232,6 @@ class Ollama_chat:
             temperature=0.25,
             num_predict=64,
         )
-
         reply = self._clean_reply(raw_reply)
 
         # 回复过长、过短或句子残缺时，再压缩重写一次。
@@ -190,7 +246,6 @@ class Ollama_chat:
                 emotion=emotion,
                 user_message=user_message,
             )
-
             reply = self._clean_reply(repair_raw_reply)
 
         # 第二次仍不合格，使用完整兜底句。
@@ -231,6 +286,7 @@ class Ollama_chat:
                 "top_p": 0.70,
                 "top_k": 20,
                 "repeat_penalty": 1.12,
+
                 # 这里限制的是token，不是汉字数量。
                 # 必须给足空间，让模型先生成完整句子。
                 "num_predict": num_predict,
@@ -244,7 +300,6 @@ class Ollama_chat:
             stream=self.stream,
             timeout=(5, self.timeout),
         )
-
         response.raise_for_status()
 
         if self.stream:
@@ -308,11 +363,12 @@ class Ollama_chat:
 必须遵守：
 1. 只输出改写后的最终句子。
 2. 必须是一句完整的话。
-3. 总长度为10到20个可见字符。
+3. 总长度为10到30个可见字符。
 4. 不得从中间截断句子。
 5. 不得以“但、不过、因为、所以、请、一个、的”等词结尾。
-6. 不反问，不说教，不使用表情符号。
-7. 不输出解释、字数或角色名称。
+6. 可以自然提问，但不要连续追问或给用户压力。
+7. 不说教，不使用表情符号。
+8. 不输出解释、字数或角色名称。
 """.strip()
 
         repair_user_prompt = f"""
@@ -320,7 +376,7 @@ class Ollama_chat:
 用户原话：{user_message}
 原始回复：{draft}
 
-请将原始回复压缩改写为一句10到20字的完整共情回复。
+请将原始回复压缩改写为一句10到30字的完整共情回复。
 """.strip()
 
         repair_messages = [
@@ -340,7 +396,6 @@ class Ollama_chat:
                 temperature=0.10,
                 num_predict=48,
             )
-
         except Exception as exc:
             print(
                 f"[LLM] 压缩重写失败：{exc}",
@@ -358,10 +413,9 @@ class Ollama_chat:
         清洗模型回复。
 
         重要：
-        这里绝对不再使用 text[:20] 强制截断。
+        这里绝对不再使用 text[:30] 强制截断。
         不合格就返回空字符串，交给重写或兜底处理。
         """
-
         text = str(text or "")
 
         # 删除思考标签。
@@ -394,9 +448,8 @@ class Ollama_chat:
         # 删除换行和多余空格。
         text = re.sub(r"\s+", "", text)
 
-        # 反问符号改成句号。
-        text = text.replace("？", "。")
-        text = text.replace("?", "。")
+        # 保留正常的疑问语气。
+        # 例如“你好！有什么可以帮助你的吗？”属于自然回复。
 
         # 删除外层引号。
         text = cls._strip_outer_quotes(text)
@@ -427,13 +480,25 @@ class Ollama_chat:
         ):
             return ""
 
-        # 找出所有已经完整结束的句子。
+        # 如果整段是一至两句完整短句，并且总长度合格，
+        # 直接保留整段，例如“你好！有什么可以帮助你的吗？”。
+        sentence_end_count = len(
+            re.findall(r"[。！？!?]", text)
+        )
+
+        if (
+            text.endswith(("。", "！", "？", "!", "?"))
+            and 1 <= sentence_end_count <= 2
+            and cls._is_valid_sentence(text)
+        ):
+            return text
+
+        # 整段不合格时，再尝试提取其中一条完整句子。
         complete_sentences = re.findall(
-            r"[^。！\n]+[。！]",
+            r"[^。！？!?\n]+[。！？!?]",
             text,
         )
 
-        # 优先选择第一条长度合格且完整的句子。
         for sentence in complete_sentences:
             sentence = sentence.strip()
 
@@ -441,15 +506,15 @@ class Ollama_chat:
                 return sentence
 
         # 模型有时不输出标点，但内容本身已经完整。
-        if "。" not in text and "！" not in text:
+        if not any(mark in text for mark in "。！？!?"):
             candidate = text.strip("，、；：")
 
-            # 加句号之后仍不得超过20字。
-            if len(candidate) <= 19:
+            # 加句号之后仍不得超过30字。
+            if len(candidate) <= 29:
                 candidate += "。"
 
-                if cls._is_valid_sentence(candidate):
-                    return candidate
+            if cls._is_valid_sentence(candidate):
+                return candidate
 
         # 太长、太短或句子残缺，返回空。
         # 由上层执行压缩重写，而不是强制截断。
@@ -464,13 +529,10 @@ class Ollama_chat:
 
         length = len(re.sub(r"\s+", "", sentence))
 
-        if not 10 <= length <= 20:
+        if not 10 <= length <= 30:
             return False
 
         if "\n" in sentence:
-            return False
-
-        if "？" in sentence or "?" in sentence:
             return False
 
         if cls._is_incomplete_sentence(sentence):
@@ -549,10 +611,27 @@ class Ollama_chat:
 
     @staticmethod
     def _infer_emotion(system_prompt):
+        """
+        从本轮 system prompt 中提取当前情绪。
+
+        优先读取“当前用户情绪：xxx”这一行，避免风格示例、
+        历史内容或其他说明文字中的情绪词影响判断。
+        """
         prompt = str(system_prompt or "")
+
+        match = re.search(
+            r"当前用户情绪\s*[：:]\s*([^。\n]+)",
+            prompt,
+        )
+        current_emotion_text = (
+            match.group(1).strip()
+            if match
+            else prompt
+        )
 
         checks = [
             ("生气烦躁", "angry"),
+            ("烦躁和生气", "angry"),
             ("生气", "angry"),
             ("烦躁", "angry"),
             ("难过低落", "sad"),
@@ -564,14 +643,88 @@ class Ollama_chat:
             ("惊喜惊讶", "surprise"),
             ("惊喜", "surprise"),
             ("惊讶", "surprise"),
+            ("平静", "neutral"),
             ("未知", "no_face"),
         ]
 
         for keyword, emotion in checks:
-            if keyword in prompt:
+            if keyword in current_emotion_text:
                 return emotion
 
         return "neutral"
+
+    @staticmethod
+    def _is_emotion_status_query(user_message):
+        """
+        判断用户是否在询问自己的当前心情、情绪或表情。
+
+        只匹配明确的状态查询，不会把“我心情不好怎么办”
+        这类普通倾诉误判成视觉状态查询。
+        """
+        text = re.sub(
+            r"[\s，。！？、,.!?；;：:]",
+            "",
+            str(user_message or ""),
+        )
+
+        if not text:
+            return False
+
+        patterns = [
+            r"(你觉得|你看|你认为|帮我看|看看)?"
+            r"我(现在|目前)?(的)?"
+            r"(心情|情绪|表情)"
+            r"(是)?(什么|怎么样|怎样|如何|什么样)",
+
+            r"我(现在|目前)?"
+            r"(是|属于)?"
+            r"(什么|哪种|怎样的?)"
+            r"(心情|情绪|表情)",
+
+            r"(你能|能不能|可以)?"
+            r"(看出|判断|识别)(一下)?"
+            r"我(现在|目前)?(的)?"
+            r"(心情|情绪|表情)",
+        ]
+
+        return any(
+            re.search(pattern, text)
+            for pattern in patterns
+        )
+
+    def _direct_emotion_status_reply(
+        self,
+        user_message,
+        emotion,
+    ):
+        """
+        对明确的当前情绪查询，从对应模板中随机选择一句。
+
+        该分支不调用大模型，因此不会受历史对话干扰；
+        同一情绪连续查询时，尽量避免重复上一句。
+        """
+        if not self._is_emotion_status_query(user_message):
+            return None
+
+        if emotion not in self.EMOTION_STATUS_REPLIES:
+            emotion = "no_face"
+
+        replies = self.EMOTION_STATUS_REPLIES[emotion]
+        last_reply = self._last_emotion_status_reply.get(emotion)
+
+        candidates = [
+            reply
+            for reply in replies
+            if reply != last_reply
+        ]
+
+        if not candidates:
+            candidates = replies
+
+        reply = random.choice(candidates)
+        self._last_emotion_status_reply[emotion] = reply
+
+        return reply
 
     @classmethod
     def _fallback_reply(

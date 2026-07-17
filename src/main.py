@@ -15,8 +15,7 @@ from PyQt5.QtWidgets import QApplication, QMessageBox
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_DIR = PROJECT_ROOT / "config"
 
-# main.py 在 src 目录中，server 目录在项目根目录中。
-# 所以这里同时加入 PROJECT_ROOT 和 CONFIG_DIR，保证能导入 server 与 config。
+
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -471,7 +470,7 @@ class EmotionRobot(QObject):
         return self.last_emotion, self.last_emotion_prob
 
     def _apply_special_emotion_lock(self, emotion, prob, allow_start=True):
-        """特殊情绪锁定机制。\n\n        目标：\n        1. 检测到 angry / happy / sad / surprise 后，短时间锁定；\n        2. 锁定期间不允许马上跳到另一个特殊情绪；\n        3. 锁定自然结束后，不允许“同一个情绪”立刻再次锁定；\n        4. 只有离开该情绪后，才允许它下一次重新锁定。\n\n        这样可以避免终端一直出现：\n        锁定 happy -> happy 锁定结束 -> 又锁定 happy -> 又结束 -> 又锁定 happy\n        """
+       
         emotion = str(emotion or "neutral").lower()
         prob = float(prob or 0.0)
         now = time.time()
@@ -1474,13 +1473,8 @@ class EmotionRobot(QObject):
             self.last_unlocked_special_emotion = None
 
     def _smooth_emotion(self, raw_emotion, prob):
-        """二级平滑：先过滤低置信度，再用投票 + 滞回切换。
-
-        这版专门解决你现在终端里 angry / happy / neutral / sad 来回跳的问题：
-        - 低置信度结果不进入窗口；
-        - neutral 门槛更高，防止模型一抖就回平静；
-        - 最近 N 次结果必须达到票数和占比，才可能成为候选；
-        - 候选还要连续保持几轮，才真正切换 UI、App、统计状态。
+        """
+        二级平滑：先过滤低置信度，再用投票 + 滞回切换。
         """
         raw_emotion = str(raw_emotion or "neutral").lower()
         prob = float(prob or 0.0)

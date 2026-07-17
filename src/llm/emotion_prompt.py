@@ -1,9 +1,13 @@
-# src/llm/emotion_prompt.py
-
 from __future__ import annotations
 
 
-SPECIAL_EMOTIONS = {"angry", "happy", "sad", "surprise"}
+SPECIAL_EMOTIONS = {
+    "angry",
+    "happy",
+    "sad",
+    "surprise",
+}
+
 
 EMOTION_CN = {
     "happy": "开心",
@@ -14,14 +18,16 @@ EMOTION_CN = {
     "no_face": "未知",
 }
 
+
 EMOTION_GUIDANCE = {
     "happy": "分享用户的喜悦，给予真诚肯定，语气轻快。",
     "angry": "先接住用户的烦躁和委屈，语气平稳，不反驳。",
     "sad": "先承认用户的难受，表达理解和陪伴，不说空洞大道理。",
     "surprise": "回应用户的惊喜或惊讶，语气自然轻快。",
     "neutral": "根据用户原话自然回应，表达理解和陪伴。",
-    "no_face": "只根据用户原话自然回应，不猜测用户表情。",
+    "no_face": "只根据用户原话自然回应；若用户询问当前情绪，说明暂时无法判断。",
 }
+
 
 EMOTION_EXAMPLES = {
     "happy": [
@@ -49,6 +55,7 @@ EMOTION_EXAMPLES = {
         "你的感受很重要，我会认真听着。",
     ],
 }
+
 
 CN_TO_KEY = {
     "开心": "happy",
@@ -117,6 +124,7 @@ def build_robot_system_prompt(
         if active_emotion
         else None
     )
+
     active_conf = (
         normalize_confidence(active_confidence)
         if active_confidence is not None
@@ -128,7 +136,10 @@ def build_robot_system_prompt(
     source = "normal"
 
     # 主动触发的情绪优先。
-    if active_key in SPECIAL_EMOTIONS and active_conf >= min_confidence:
+    if (
+        active_key in SPECIAL_EMOTIONS
+        and active_conf >= min_confidence
+    ):
         final_key = active_key
         final_conf = active_conf
         source = "active_event"
@@ -162,18 +173,20 @@ def build_robot_system_prompt(
 结合用户刚刚说的具体内容和当前情绪，生成一句自然的中文共情回复。
 
 硬性规则：
-1. 只输出一句话。
-2. 回复控制在10到20个中文字符左右。
+1. 输出一至两句简短、自然的话。
+2. 回复控制在10到30个中文字符左右。
 3. 必须体现理解、陪伴或情绪回应。
 4. 不得只回答事实而忽略用户情绪。
-5. 不反问，不使用问号。
+5. 可以自然提问，但不要连续追问或给用户压力。
 6. 不说教，不命令用户。
 7. 不输出建议清单。
 8. 不使用表情符号。
 9. 不提摄像头、模型、识别结果或置信度。
 10. 不输出“用户”“助手”“回复”等角色标记。
 11. 不复述用户整句话。
-12. 只输出机器人最终要说的话。
+12. 如果用户询问自己当前的心情、情绪或表情，直接说出当前情绪。
+13. 当前情绪为“未知”时，只说明暂时无法判断，不得凭空猜测。
+14. 只输出机器人最终要说的话。
 
 风格示例：
 {examples[0]}
@@ -183,7 +196,11 @@ def build_robot_system_prompt(
 """.strip()
 
     info = {
-        "mode": "emotion" if final_key in SPECIAL_EMOTIONS else "normal",
+        "mode": (
+            "emotion"
+            if final_key in SPECIAL_EMOTIONS
+            else "normal"
+        ),
         "emotion": final_key,
         "confidence": final_conf,
         "face_detected": bool(face_detected),
