@@ -492,12 +492,22 @@ class MainWindow(QWidget):
 
     def show_chat_ui(self):
         self.current_page = "chat"
-        self.stack.setCurrentWidget(self.chat_page)
+        self.stack.setCurrentWidget(
+            self.chat_page
+        )
+
         if self.current_state == "emotion":
             self._reset_record_button()
             self.exit_chat_button.hide()
             self.set_status("可以继续说")
+
         self.page_changed.emit("chat")
+
+        # 每次进入聊天页面时显示最新消息。
+        QTimer.singleShot(
+            0,
+            self._scroll_chat_to_bottom,
+        )
 
     def show_face_ui(self):
         self.current_page = "face"
@@ -710,9 +720,18 @@ class MainWindow(QWidget):
             row_layout.addWidget(bubble, 0, Qt.AlignLeft)
             row_layout.addStretch(1)
 
-        insert_index = max(0, self.chat_layout.count() - 1)
-        self.chat_layout.insertWidget(insert_index, row)
-        self._scroll_chat_to_bottom()
+        insert_index = max(
+            0,
+            self.chat_layout.count() - 1,
+        )
+
+        self.chat_layout.insertWidget(
+            insert_index,
+            row,
+        )
+
+        # 将本次新增的消息传入，自动定位到最新气泡。
+        self._scroll_chat_to_bottom(row)
 
     def _remove_empty_hint(self):
         """移除空提示，但不要销毁它。"""
@@ -732,11 +751,62 @@ class MainWindow(QWidget):
 
         self.chat_layout.addStretch(1)
 
-    def _scroll_chat_to_bottom(self):
+    def _scroll_chat_to_bottom(
+        self,
+        target_widget=None,
+    ):
+        """
+        将聊天区域自动滚动到最新消息。
+
+        第一次延迟等待控件插入布局；
+        第二次延迟等待 QLabel 完成自动换行和高度计算。
+        """
+
         def do_scroll():
-            bar = self.chat_scroll.verticalScrollBar()
-            bar.setValue(bar.maximum())
-        QTimer.singleShot(0, do_scroll)
+            if not hasattr(
+                self,
+                "chat_scroll",
+            ):
+                return
+
+            # 强制刷新聊天布局及内容高度。
+            self.chat_layout.activate()
+            self.chat_content.updateGeometry()
+
+            # 优先确保本次新消息进入可见区域。
+            if target_widget is not None:
+                self.chat_scroll.ensureWidgetVisible(
+                    target_widget,
+                    0,
+                    16,
+                )
+
+            # 最终强制移动到滚动条底部。
+            scroll_bar = (
+                self.chat_scroll
+                .verticalScrollBar()
+            )
+            scroll_bar.setValue(
+                scroll_bar.maximum()
+            )
+
+        # 等待新控件加入布局。
+        QTimer.singleShot(
+            0,
+            do_scroll,
+        )
+
+        # 等待文字自动换行和气泡高度计算完成。
+        QTimer.singleShot(
+            60,
+            do_scroll,
+        )
+
+        # 板端性能较慢时再校正一次。
+        QTimer.singleShot(
+            150,
+            do_scroll,
+        )
 
     # ---------- 退出逻辑 ----------
     def closeEvent(self, event):

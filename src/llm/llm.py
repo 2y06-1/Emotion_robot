@@ -2,10 +2,15 @@ import html
 import json
 import random
 import re
+import threading
 import unicodedata
 from pathlib import Path
 
 import requests
+
+
+class LLMRequestCancelled(Exception):
+    """LLM 请求被用户主动取消。"""
 
 
 class Ollama_chat:
@@ -142,6 +147,14 @@ class Ollama_chat:
         self.api_url = f"{self.base_url}/api/chat"
         self.history = []
 
+        # 当前 Ollama 请求的取消状态。
+        #
+        # UI 仍然只在完整回复生成后显示一次；这里使用流式 HTTP
+        # 传输只是为了能在退出聊天时关闭连接、停止模型生成。
+        self._request_lock = threading.RLock()
+        self._active_cancel_event = None
+        self._active_response = None
+
         # 记录每种情绪上一次使用的状态回复，
         # 随机选择时尽量避免连续说同一句。
         self._last_emotion_status_reply = {}
@@ -186,101 +199,291 @@ class Ollama_chat:
     # =========================================================
 
     def chat_ollama(self, user_message, system_prompt=None):
-        user_message = str(user_message or "").strip()
-        system_prompt = str(system_prompt or "").strip()
+        """
+        生成完整回复后一次性返回。
 
-        emotion = self._infer_emotion(system_prompt)
+        注意：不会向 UI 逐字输出。底层始终使用 Ollama 的流式
+        HTTP 响应，只是为了在用户退出聊天时能够关闭连接并立即
+        中断正在进行的模型生成。
+        """
+        cancel_event = self._begin_request()
 
-        # 用户明确询问自己当前的心情、情绪或表情时，
-        # 直接根据本轮视觉状态回答，不让历史对话干扰判断。
-        direct_reply = self._direct_emotion_status_reply(
-            user_message=user_message,
-            emotion=emotion,
-        )
+        try:
+            user_message = str(user_message or "").strip()
+            system_prompt = str(system_prompt or "").strip()
 
-        if direct_reply:
-            print(f"{self.model_name} > {direct_reply}", flush=True)
+            self._raise_if_cancelled(cancel_event)
+            emotion = self._infer_emotion(system_prompt)
 
-            self.history_append("user", user_message)
-            self.history_append("assistant", direct_reply)
+            # 用户明确询问自己当前的心情、情绪或表情时，
+            # 直接根据本轮视觉状态回答，不让历史对话干扰判断。
+            direct_reply = self._direct_emotion_status_reply(
+                user_message=user_message,
+                emotion=emotion,
+            )
 
-            return direct_reply
+            if direct_reply:
+                self._raise_if_cancelled(cancel_event)
 
-        messages = []
+                print(
+                    f"{self.model_name} > {direct_reply}",
+                    flush=True,
+                )
 
-        if system_prompt:
+                self._append_completed_exchange(
+                    user_message=user_message,
+                    assistant_reply=direct_reply,
+                    cancel_event=cancel_event,
+                )
+                return direct_reply
+
+            messages = []
+
+            if system_prompt:
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": system_prompt,
+                    }
+                )
+
+            # 只发送最近3轮历史。
+            messages.extend(self.history[-6:])
             messages.append(
                 {
-                    "role": "system",
-                    "content": system_prompt,
+                    "role": "user",
+                    "content": user_message,
                 }
             )
 
-        # 只发送最近3轮历史。
-        messages.extend(self.history[-6:])
+            # 第一次正常生成。
+            raw_reply = self._request_model(
+                messages=messages,
+                temperature=0.25,
+                num_predict=64,
+                cancel_event=cancel_event,
+            )
+            self._raise_if_cancelled(cancel_event)
 
-        messages.append(
-            {
-                "role": "user",
-                "content": user_message,
-            }
-        )
+            reply = self._clean_reply(raw_reply)
 
-        # 第一次正常生成。
-        raw_reply = self._request_model(
-            messages=messages,
-            temperature=0.25,
-            num_predict=64,
-        )
-        reply = self._clean_reply(raw_reply)
+            # 回复过长、过短或句子残缺时，再压缩重写一次。
+            if not reply:
+                print(
+                    "[LLM] 首次回复不合格，尝试压缩重写："
+                    f"{raw_reply}",
+                    flush=True,
+                )
 
-        # 回复过长、过短或句子残缺时，再压缩重写一次。
-        if not reply:
+                repair_raw_reply = self._repair_reply(
+                    draft=raw_reply,
+                    emotion=emotion,
+                    user_message=user_message,
+                    cancel_event=cancel_event,
+                )
+                self._raise_if_cancelled(cancel_event)
+                reply = self._clean_reply(repair_raw_reply)
+
+            # 第二次仍不合格，使用完整兜底句。
+            if not reply:
+                self._raise_if_cancelled(cancel_event)
+
+                reply = self._fallback_reply(
+                    emotion=emotion,
+                    user_message=user_message,
+                )
+
+                print(
+                    f"[LLM] 使用情绪兜底回复：{reply}",
+                    flush=True,
+                )
+
+            self._raise_if_cancelled(cancel_event)
+
             print(
-                f"[LLM] 首次回复不合格，尝试压缩重写：{raw_reply}",
+                f"{self.model_name} > {reply}",
                 flush=True,
             )
 
-            repair_raw_reply = self._repair_reply(
-                draft=raw_reply,
-                emotion=emotion,
+            self._append_completed_exchange(
                 user_message=user_message,
+                assistant_reply=reply,
+                cancel_event=cancel_event,
             )
-            reply = self._clean_reply(repair_raw_reply)
+            return reply
 
-        # 第二次仍不合格，使用完整兜底句。
-        if not reply:
-            reply = self._fallback_reply(
-                emotion=emotion,
-                user_message=user_message,
-            )
-
-            print(
-                f"[LLM] 使用情绪兜底回复：{reply}",
-                flush=True,
-            )
-
-        print(f"{self.model_name} > {reply}", flush=True)
-
-        self.history_append("user", user_message)
-        self.history_append("assistant", reply)
-
-        return reply
+        finally:
+            self._finish_request(cancel_event)
 
     # =========================================================
-    # Ollama 请求
+    # Ollama 请求与主动取消
     # =========================================================
+
+    def _begin_request(self):
+        """
+        创建本轮请求的独立取消事件。
+
+        如果前一轮请求仍未退出，会先取消并关闭它；新请求不会复用
+        旧请求的取消事件，因此快速退出后重新聊天也不会互相影响。
+        """
+        previous_response = None
+
+        with self._request_lock:
+            previous_event = self._active_cancel_event
+            previous_response = self._active_response
+
+            if previous_event is not None:
+                previous_event.set()
+
+            self._active_response = None
+
+            cancel_event = threading.Event()
+            self._active_cancel_event = cancel_event
+
+        if previous_response is not None:
+            try:
+                previous_response.close()
+            except Exception:
+                pass
+
+        return cancel_event
+
+    def _finish_request(self, cancel_event):
+        """只清理属于本轮请求的共享状态。"""
+        with self._request_lock:
+            if self._active_cancel_event is cancel_event:
+                self._active_cancel_event = None
+                self._active_response = None
+
+    def cancel_active_request(self):
+        """
+        主动停止当前 Ollama 请求。
+
+        先设置取消事件，再关闭 requests.Response。关闭响应会打断
+        正在阻塞的 iter_lines()，同时断开 Ollama 客户端连接，使
+        服务端停止继续为本次请求生成。
+        """
+        with self._request_lock:
+            cancel_event = self._active_cancel_event
+            response = self._active_response
+
+            if cancel_event is not None:
+                cancel_event.set()
+
+            if self._active_response is response:
+                self._active_response = None
+
+        if response is not None:
+            try:
+                response.close()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _raise_if_cancelled(cancel_event):
+        if (
+            cancel_event is not None
+            and cancel_event.is_set()
+        ):
+            raise LLMRequestCancelled(
+                "LLM request cancelled"
+            )
+
+    def _register_active_response(
+        self,
+        response,
+        cancel_event,
+    ):
+        """
+        将响应登记为当前活动响应。
+
+        如果登记之前用户已经退出聊天，立即关闭刚建立的响应，
+        不允许它继续进入读取循环。
+        """
+        should_cancel = False
+
+        with self._request_lock:
+            if (
+                cancel_event.is_set()
+                or self._active_cancel_event
+                is not cancel_event
+            ):
+                should_cancel = True
+            else:
+                self._active_response = response
+
+        if should_cancel:
+            try:
+                response.close()
+            except Exception:
+                pass
+
+            raise LLMRequestCancelled(
+                "LLM request cancelled before reading"
+            )
+
+    def _clear_active_response(
+        self,
+        response,
+        cancel_event,
+    ):
+        with self._request_lock:
+            if (
+                self._active_cancel_event
+                is cancel_event
+                and self._active_response
+                is response
+            ):
+                self._active_response = None
+
+    def _append_completed_exchange(
+        self,
+        user_message,
+        assistant_reply,
+        cancel_event,
+    ):
+        """
+        只在请求仍有效时写入历史。
+
+        该检查与 cancel_active_request 使用同一把锁，可避免退出
+        聊天和历史写入恰好同时发生时，旧回复重新写回清空后的历史。
+        """
+        with self._request_lock:
+            if (
+                cancel_event.is_set()
+                or self._active_cancel_event
+                is not cancel_event
+            ):
+                raise LLMRequestCancelled(
+                    "LLM request cancelled before history write"
+                )
+
+            self.history_append(
+                "user",
+                user_message,
+            )
+            self.history_append(
+                "assistant",
+                assistant_reply,
+            )
 
     def _request_model(
         self,
         messages,
         temperature=0.25,
         num_predict=64,
+        cancel_event=None,
     ):
+        self._raise_if_cancelled(
+            cancel_event
+        )
+
+        # 始终使用流式 HTTP 传输以支持主动关闭连接。
+        # 分片只在 llm.py 内部拼接，不会发送给 UI。
         payload = {
             "model": self.model_name,
             "messages": messages,
-            "stream": self.stream,
+            "stream": True,
             "options": {
                 "temperature": temperature,
                 "top_p": 0.70,
@@ -294,25 +497,75 @@ class Ollama_chat:
             },
         }
 
-        response = requests.post(
-            self.api_url,
-            json=payload,
-            stream=self.stream,
-            timeout=(5, self.timeout),
-        )
-        response.raise_for_status()
+        response = None
 
-        if self.stream:
-            return self._read_stream_response(response)
+        try:
+            response = requests.post(
+                self.api_url,
+                json=payload,
+                stream=True,
+                timeout=(5, self.timeout),
+            )
 
-        data = response.json()
-        return data.get("message", {}).get("content", "")
+            self._register_active_response(
+                response=response,
+                cancel_event=cancel_event,
+            )
 
-    @staticmethod
-    def _read_stream_response(response):
+            response.raise_for_status()
+
+            return self._read_stream_response(
+                response=response,
+                cancel_event=cancel_event,
+            )
+
+        except LLMRequestCancelled:
+            raise
+
+        except Exception:
+            # response.close() 打断 iter_lines() 时 requests/urllib3
+            # 可能抛出不同异常；取消事件已设置时统一视为正常取消。
+            if (
+                cancel_event is not None
+                and cancel_event.is_set()
+            ):
+                raise LLMRequestCancelled(
+                    "LLM request cancelled while reading"
+                )
+
+            raise
+
+        finally:
+            if response is not None:
+                self._clear_active_response(
+                    response=response,
+                    cancel_event=cancel_event,
+                )
+
+                try:
+                    response.close()
+                except Exception:
+                    pass
+
+    def _read_stream_response(
+        self,
+        response,
+        cancel_event,
+    ):
+        """
+        在内部拼接所有分片，完成后一次性返回完整字符串。
+
+        这里没有任何 UI 回调，因此不是流式显示。
+        """
         full_reply = []
 
-        for line in response.iter_lines():
+        for line in response.iter_lines(
+            chunk_size=1
+        ):
+            self._raise_if_cancelled(
+                cancel_event
+            )
+
             if not line:
                 continue
 
@@ -338,6 +591,9 @@ class Ollama_chat:
             if chunk.get("done"):
                 break
 
+        self._raise_if_cancelled(
+            cancel_event
+        )
         return "".join(full_reply)
 
     # =========================================================
@@ -349,6 +605,7 @@ class Ollama_chat:
         draft,
         emotion,
         user_message,
+        cancel_event,
     ):
         emotion_cn = self.EMOTION_CN.get(
             emotion,
@@ -395,7 +652,13 @@ class Ollama_chat:
                 messages=repair_messages,
                 temperature=0.10,
                 num_predict=48,
+                cancel_event=cancel_event,
             )
+
+        except LLMRequestCancelled:
+            # 取消不能被当作“重写失败”，否则上层会继续生成兜底回复。
+            raise
+
         except Exception as exc:
             print(
                 f"[LLM] 压缩重写失败：{exc}",

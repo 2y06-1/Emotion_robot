@@ -1893,6 +1893,16 @@ class EmotionRobot(QObject):
             self.task_id += 1
             self.cancel_event.set()
 
+        # 不只是忽略旧结果，还要关闭正在读取的 Ollama HTTP 响应，
+        # 真正停止模型继续生成。
+        try:
+            self.llm_bot.cancel_active_request()
+        except Exception as exc:
+            print(
+                f"[LLM] 取消当前请求失败: {exc}",
+                flush=True,
+            )
+
         if self.is_recording:
             self.voice_collector.stop_recording()
             self.is_recording = False
@@ -2165,6 +2175,19 @@ class EmotionRobot(QObject):
 
         if reply != QMessageBox.Yes:
             return
+
+        # 程序退出也要先让 LLM 线程失效并关闭 HTTP 响应。
+        with self.task_lock:
+            self.task_id += 1
+            self.cancel_event.set()
+
+        try:
+            self.llm_bot.cancel_active_request()
+        except Exception as exc:
+            print(
+                f"[LLM] 退出时取消请求失败: {exc}",
+                flush=True,
+            )
 
         if self.is_recording:
             self.voice_collector.stop_recording()
