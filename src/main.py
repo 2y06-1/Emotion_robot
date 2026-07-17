@@ -28,6 +28,7 @@ from config import cfg
 # 将配置中的模块路径加入 Python 搜索路径。
 for module_path in cfg.PYTHON_PATHS:
     module_path_str = str(module_path)
+
     if module_path_str not in sys.path:
         sys.path.insert(0, module_path_str)
 
@@ -126,9 +127,19 @@ class EmotionRobot(QObject):
         self.rec_thread = None
 
         # =====================================================
-        # TTS 状态
+        # TTS 子进程并发状态
         # =====================================================
+        # 进程生命周期锁：只保护 tts_proc、启动状态和代数。
         self.tts_proc = None
+        self.tts_process_lock = threading.RLock()
+        self.tts_start_cond = threading.Condition(
+            self.tts_process_lock
+        )
+        self.tts_starting = False
+        self.tts_generation = 0
+
+        # 通信锁：保证同一时间只有一个线程读写 worker。
+        self.tts_io_lock = threading.Lock()
 
         # =====================================================
         # 视觉模块
@@ -165,7 +176,7 @@ class EmotionRobot(QObject):
         # 情绪状态并发保护
         # =====================================================
         # UI 线程可能在视觉线程推理期间退出聊天。
-        # 使用 RLock 和 epoch，防止退出前的旧帧重新写回旧情绪。
+        # 使用 RLock 和 epoch，防止旧帧重新写回旧情绪。
         self.emotion_state_lock = threading.RLock()
         self.emotion_state_epoch = 0
 
@@ -188,8 +199,12 @@ class EmotionRobot(QObject):
         # 连接 UI 信号
         # =====================================================
         self.ui_clear_chat.connect(self._on_ui_clear_chat)
-        self.ui_append_user.connect(self.ui.append_user_message)
-        self.ui_append_ai.connect(self.ui.append_ai_message)
+        self.ui_append_user.connect(
+            self.ui.append_user_message
+        )
+        self.ui_append_ai.connect(
+            self.ui.append_ai_message
+        )
         self.ui_append_system.connect(
             self.ui.append_system_message
         )
@@ -213,9 +228,15 @@ class EmotionRobot(QObject):
             self.ui.set_state_error
         )
 
-        self.ui_set_emotion.connect(self.ui.set_emotion)
-        self.ui_show_robot.connect(self.ui.show_robot_ui)
-        self.ui_show_chat.connect(self.ui.show_chat_ui)
+        self.ui_set_emotion.connect(
+            self.ui.set_emotion
+        )
+        self.ui_show_robot.connect(
+            self.ui.show_robot_ui
+        )
+        self.ui_show_chat.connect(
+            self.ui.show_chat_ui
+        )
         self.ui_set_user_face.connect(
             self.ui.update_user_face
         )
@@ -223,19 +244,26 @@ class EmotionRobot(QObject):
         self.ui.record_button_clicked.connect(
             self.on_record_button
         )
-        self.ui.page_changed.connect(self.on_page_changed)
-        self.ui.exit_chat_clicked.connect(self.on_exit_chat)
+        self.ui.page_changed.connect(
+            self.on_page_changed
+        )
+        self.ui.exit_chat_clicked.connect(
+            self.on_exit_chat
+        )
         self.ui.exit_program_clicked.connect(
             self.on_exit_program
         )
 
+        # 必须先连接信号，再启动后台服务。
         self.tts_start.connect(self._on_tts_start)
         self.tts_stop.connect(self._on_tts_stop)
 
         # 启动服务。
         self._start_ws_server()
         self._start_vision()
-        self._start_tts_process()
+
+        # TTS 模型加载放到后台线程，不阻塞 PyQt UI。
+        self._start_tts_process_async()
 
         if cfg.UI_FULLSCREEN:
             self.ui.showFullScreen()
@@ -285,13 +313,17 @@ class EmotionRobot(QObject):
         if cap is None:
             return
 
-        fourcc = str(cfg_get("CAMERA_FOURCC", "MJPG"))
+        fourcc = str(
+            cfg_get("CAMERA_FOURCC", "MJPG")
+        )
 
         if fourcc:
             try:
                 cap.set(
                     cv2.CAP_PROP_FOURCC,
-                    cv2.VideoWriter_fourcc(*fourcc[:4]),
+                    cv2.VideoWriter_fourcc(
+                        *fourcc[:4]
+                    ),
                 )
             except Exception:
                 pass
@@ -322,7 +354,10 @@ class EmotionRobot(QObject):
         )
 
         auto_exposure = bool(
-            cfg_get("CAMERA_AUTO_EXPOSURE", True)
+            cfg_get(
+                "CAMERA_AUTO_EXPOSURE",
+                True,
+            )
         )
 
         self._try_set_cap(
@@ -336,7 +371,10 @@ class EmotionRobot(QObject):
             self._try_set_cap(
                 cap,
                 cv2.CAP_PROP_EXPOSURE,
-                cfg_get("CAMERA_EXPOSURE", -4),
+                cfg_get(
+                    "CAMERA_EXPOSURE",
+                    -4,
+                ),
                 "EXPOSURE",
             )
 
@@ -349,21 +387,32 @@ class EmotionRobot(QObject):
         self._try_set_cap(
             cap,
             cv2.CAP_PROP_BRIGHTNESS,
-            cfg_get("CAMERA_BRIGHTNESS", 150),
+            cfg_get(
+                "CAMERA_BRIGHTNESS",
+                150,
+            ),
             "BRIGHTNESS",
         )
         self._try_set_cap(
             cap,
             cv2.CAP_PROP_CONTRAST,
-            cfg_get("CAMERA_CONTRAST", 128),
+            cfg_get(
+                "CAMERA_CONTRAST",
+                128,
+            ),
             "CONTRAST",
         )
 
         warmup_frames = int(
-            cfg_get("CAMERA_WARMUP_FRAMES", 10)
+            cfg_get(
+                "CAMERA_WARMUP_FRAMES",
+                10,
+            )
         )
 
-        for _ in range(max(0, warmup_frames)):
+        for _ in range(
+            max(0, warmup_frames)
+        ):
             cap.read()
 
     def _open_camera_by_device(self, device):
@@ -376,7 +425,10 @@ class EmotionRobot(QObject):
         except Exception:
             cap = cv2.VideoCapture(device)
 
-        if cap is not None and cap.isOpened():
+        if (
+            cap is not None
+            and cap.isOpened()
+        ):
             self._apply_camera_settings(cap)
             return cap
 
@@ -401,10 +453,14 @@ class EmotionRobot(QObject):
                         cv2.CAP_V4L2,
                     )
                 except Exception:
-                    cap = cv2.VideoCapture(index)
+                    cap = cv2.VideoCapture(
+                        index
+                    )
 
                 if cap.isOpened():
-                    self._apply_camera_settings(cap)
+                    self._apply_camera_settings(
+                        cap
+                    )
                     return cap
 
                 try:
@@ -428,7 +484,9 @@ class EmotionRobot(QObject):
                 top_k=cfg.EMOTION_TOP_K,
                 threads=cfg.EMOTION_THREADS,
                 provider=cfg.EMOTION_PROVIDER,
-                class_names=cfg.EMOTION_CLASS_NAMES,
+                class_names=(
+                    cfg.EMOTION_CLASS_NAMES
+                ),
                 mean=cfg.EMOTION_MEAN,
                 std=cfg.EMOTION_STD,
                 auto_enhance=cfg_get(
@@ -445,23 +503,31 @@ class EmotionRobot(QObject):
                 ),
             )
 
-            self.cap = self._open_camera_by_device(
-                cfg.CAMERA_DEVICE
+            self.cap = (
+                self._open_camera_by_device(
+                    cfg.CAMERA_DEVICE
+                )
             )
 
             if self.cap is None:
                 print(
                     "[视觉] 主摄像头打开失败: "
                     f"{cfg.CAMERA_DEVICE}，"
-                    f"尝试备用设备: {cfg.CAMERA_FALLBACK}",
+                    "尝试备用设备: "
+                    f"{cfg.CAMERA_FALLBACK}",
                     flush=True,
                 )
 
-                self.cap = self._open_camera_by_device(
-                    cfg.CAMERA_FALLBACK
+                self.cap = (
+                    self._open_camera_by_device(
+                        cfg.CAMERA_FALLBACK
+                    )
                 )
 
-            if self.cap is None or not self.cap.isOpened():
+            if (
+                self.cap is None
+                or not self.cap.isOpened()
+            ):
                 print(
                     "[视觉] 摄像头初始化失败",
                     flush=True,
@@ -490,7 +556,9 @@ class EmotionRobot(QObject):
         self.locked_special_until = 0.0
 
         if clear_relock_history:
-            self.last_unlocked_special_emotion = None
+            self.last_unlocked_special_emotion = (
+                None
+            )
 
     def _reset_emotion_smooth(self):
         """
@@ -514,7 +582,9 @@ class EmotionRobot(QObject):
         self.last_emotion_infer_time = 0.0
         self.last_strong_emotion_time = 0.0
 
-        self.last_stable_switch_time = time.time()
+        self.last_stable_switch_time = (
+            time.time()
+        )
         self._last_print_emotion = None
 
         self._reset_special_emotion_lock(
@@ -525,8 +595,7 @@ class EmotionRobot(QObject):
         """
         完全清空一次聊天会话留下的情绪状态。
 
-        epoch 增加后，视觉线程中尚未提交的旧帧会被丢弃，
-        因此旧情绪不会在退出聊天后重新覆盖 no_face。
+        epoch 增加后，视觉线程中尚未提交的旧帧会被丢弃。
         """
         with self.emotion_state_lock:
             self.emotion_state_epoch += 1
@@ -540,7 +609,9 @@ class EmotionRobot(QObject):
             self._reset_emotion_smooth()
 
             # 防止退出聊天后立即重复上一轮关怀播报。
-            self.last_emotion_prompt_time = time.time()
+            self.last_emotion_prompt_time = (
+                time.time()
+            )
 
             print(
                 "[情绪状态] 已清空情绪上下文、"
@@ -551,7 +622,11 @@ class EmotionRobot(QObject):
     # =========================================================
     # 情绪平滑与特殊锁
     # =========================================================
-    def _smooth_emotion(self, raw_emotion, prob):
+    def _smooth_emotion(
+        self,
+        raw_emotion,
+        prob,
+    ):
         """投票、置信度过滤和滞回切换。"""
         raw_emotion = str(
             raw_emotion or "neutral"
@@ -560,38 +635,68 @@ class EmotionRobot(QObject):
         now = time.time()
 
         emotion_accept_conf = float(
-            cfg_get("EMOTION_MIN_ACCEPT_CONF", 0.42)
+            cfg_get(
+                "EMOTION_MIN_ACCEPT_CONF",
+                0.42,
+            )
         )
         neutral_accept_conf = float(
-            cfg_get("NEUTRAL_MIN_ACCEPT_CONF", 0.76)
+            cfg_get(
+                "NEUTRAL_MIN_ACCEPT_CONF",
+                0.76,
+            )
         )
 
         emotion_min_vote_frames = int(
-            cfg_get("EMOTION_MIN_VOTE_FRAMES", 5)
+            cfg_get(
+                "EMOTION_MIN_VOTE_FRAMES",
+                5,
+            )
         )
         neutral_min_vote_frames = int(
-            cfg_get("NEUTRAL_MIN_VOTE_FRAMES", 7)
+            cfg_get(
+                "NEUTRAL_MIN_VOTE_FRAMES",
+                7,
+            )
         )
 
         emotion_switch_frames = int(
-            cfg_get("EMOTION_SWITCH_FRAMES", 3)
+            cfg_get(
+                "EMOTION_SWITCH_FRAMES",
+                3,
+            )
         )
         neutral_switch_frames = int(
-            cfg_get("NEUTRAL_SWITCH_FRAMES", 5)
+            cfg_get(
+                "NEUTRAL_SWITCH_FRAMES",
+                5,
+            )
         )
 
         emotion_min_vote_ratio = float(
-            cfg_get("EMOTION_MIN_VOTE_RATIO", 0.45)
+            cfg_get(
+                "EMOTION_MIN_VOTE_RATIO",
+                0.45,
+            )
         )
         neutral_min_vote_ratio = float(
-            cfg_get("NEUTRAL_MIN_VOTE_RATIO", 0.58)
+            cfg_get(
+                "NEUTRAL_MIN_VOTE_RATIO",
+                0.58,
+            )
         )
 
         min_hold_seconds = float(
-            cfg_get("EMOTION_MIN_HOLD_SECONDS", 0.9)
+            cfg_get(
+                "EMOTION_MIN_HOLD_SECONDS",
+                0.9,
+            )
         )
         strong_switch_conf = float(
-            cfg_get("EMOTION_STRONG_SWITCH_CONF", 0.78)
+            cfg_get(
+                "EMOTION_STRONG_SWITCH_CONF",
+                0.78,
+            )
         )
 
         accept_conf = (
@@ -602,7 +707,11 @@ class EmotionRobot(QObject):
 
         if prob >= accept_conf:
             self.emotion_window.append(
-                (raw_emotion, prob, now)
+                (
+                    raw_emotion,
+                    prob,
+                    now,
+                )
             )
 
         if not self.emotion_window:
@@ -611,7 +720,9 @@ class EmotionRobot(QObject):
                 self.last_emotion_prob,
             )
 
-        window_length = len(self.emotion_window)
+        window_length = len(
+            self.emotion_window
+        )
         counter = Counter(
             item[0]
             for item in self.emotion_window
@@ -620,7 +731,11 @@ class EmotionRobot(QObject):
         prob_sum = {}
         latest_time = {}
 
-        for emotion, item_prob, item_time in self.emotion_window:
+        for (
+            emotion,
+            item_prob,
+            item_time,
+        ) in self.emotion_window:
             prob_sum[emotion] = (
                 prob_sum.get(emotion, 0.0)
                 + item_prob
@@ -652,7 +767,8 @@ class EmotionRobot(QObject):
 
             if (
                 count >= required_votes
-                and vote_ratio >= required_ratio
+                and vote_ratio
+                >= required_ratio
             ):
                 candidates.append(
                     (
@@ -691,10 +807,17 @@ class EmotionRobot(QObject):
             _latest,
         ) = candidates[0]
 
-        if target_emotion == self.last_emotion:
-            self.smooth_candidate_emotion = None
+        if (
+            target_emotion
+            == self.last_emotion
+        ):
+            self.smooth_candidate_emotion = (
+                None
+            )
             self.smooth_candidate_count = 0
-            self.last_emotion_prob = average_prob
+            self.last_emotion_prob = (
+                average_prob
+            )
 
             return (
                 self.last_emotion,
@@ -720,16 +843,23 @@ class EmotionRobot(QObject):
 
         if (
             target_emotion != "neutral"
-            and average_prob >= strong_switch_conf
+            and average_prob
+            >= strong_switch_conf
         ):
             required_switch_frames = max(
                 2,
-                min(required_switch_frames, 2),
+                min(
+                    required_switch_frames,
+                    2,
+                ),
             )
 
         if (
             self.last_emotion != "no_face"
-            and now - self.last_stable_switch_time
+            and (
+                now
+                - self.last_stable_switch_time
+            )
             < min_hold_seconds
         ):
             return (
@@ -800,7 +930,7 @@ class EmotionRobot(QObject):
             if self.locked_special_emotion:
                 print(
                     "[情绪锁定] 检测到 no_face，"
-                    f"清除锁定 "
+                    "清除锁定 "
                     f"{self.locked_special_emotion}",
                     flush=True,
                 )
@@ -813,7 +943,8 @@ class EmotionRobot(QObject):
         # 锁定期内保持原特殊情绪。
         if (
             self.locked_special_emotion
-            and now < self.locked_special_until
+            and now
+            < self.locked_special_until
         ):
             locked_emotion = (
                 self.locked_special_emotion
@@ -825,7 +956,9 @@ class EmotionRobot(QObject):
                     prob,
                 )
 
-            self.last_emotion = locked_emotion
+            self.last_emotion = (
+                locked_emotion
+            )
             self.last_emotion_prob = (
                 self.locked_special_prob
             )
@@ -838,15 +971,16 @@ class EmotionRobot(QObject):
         # 锁定自然结束。
         if (
             self.locked_special_emotion
-            and now >= self.locked_special_until
+            and now
+            >= self.locked_special_until
         ):
             old_emotion = (
                 self.locked_special_emotion
             )
 
             print(
-                f"[情绪锁定] {old_emotion} 锁定结束，"
-                "允许检测下一个情绪",
+                f"[情绪锁定] {old_emotion} "
+                "锁定结束，允许检测下一个情绪",
                 flush=True,
             )
 
@@ -864,7 +998,9 @@ class EmotionRobot(QObject):
                 relock_requires_exit
                 and self.last_unlocked_special_emotion
             ):
-                self.last_unlocked_special_emotion = None
+                self.last_unlocked_special_emotion = (
+                    None
+                )
 
             return emotion, prob
 
@@ -873,7 +1009,9 @@ class EmotionRobot(QObject):
                 relock_requires_exit
                 and self.last_unlocked_special_emotion
             ):
-                self.last_unlocked_special_emotion = None
+                self.last_unlocked_special_emotion = (
+                    None
+                )
 
             return emotion, prob
 
@@ -895,14 +1033,17 @@ class EmotionRobot(QObject):
         self.locked_special_until = (
             now + lock_seconds
         )
-        self.last_unlocked_special_emotion = None
+        self.last_unlocked_special_emotion = (
+            None
+        )
 
         self.last_emotion = emotion
         self.last_emotion_prob = prob
 
         print(
             f"[情绪锁定] 锁定 {emotion} "
-            f"{lock_seconds:.1f}s，prob={prob:.2f}",
+            f"{lock_seconds:.1f}s，"
+            f"prob={prob:.2f}",
             flush=True,
         )
 
@@ -911,14 +1052,20 @@ class EmotionRobot(QObject):
     # =========================================================
     # 情绪事件、无人脸与视觉显示
     # =========================================================
-    def _handle_emotion_count_event(self, event):
+    def _handle_emotion_count_event(
+        self,
+        event,
+    ):
         if not event:
             return
 
         if self.current_mode != "emotion":
             return
 
-        if self.is_recording or self.is_playing_tts:
+        if (
+            self.is_recording
+            or self.is_playing_tts
+        ):
             return
 
         now = time.time()
@@ -930,7 +1077,8 @@ class EmotionRobot(QObject):
         )
 
         if (
-            now - self.last_emotion_prompt_time
+            now
+            - self.last_emotion_prompt_time
             < prompt_min_interval
         ):
             return
@@ -939,7 +1087,11 @@ class EmotionRobot(QObject):
             event.get("emotion", "")
         ).lower()
 
-        if emotion in ("", "neutral", "no_face"):
+        if emotion in (
+            "",
+            "neutral",
+            "no_face",
+        ):
             return
 
         self.last_emotion_prompt_time = now
@@ -974,7 +1126,9 @@ class EmotionRobot(QObject):
         )
 
         self.ui_append_system.emit(ask_text)
-        self._play_emotion_wav_async(emotion)
+        self._play_emotion_wav_async(
+            emotion
+        )
 
     def _handle_no_face(
         self,
@@ -1003,7 +1157,10 @@ class EmotionRobot(QObject):
                 )
             )
 
-            if self.no_face_count >= reset_frames:
+            if (
+                self.no_face_count
+                >= reset_frames
+            ):
                 self._reset_emotion_smooth()
 
                 self.ui_set_emotion.emit(
@@ -1023,8 +1180,6 @@ class EmotionRobot(QObject):
                     face_detected=False,
                 )
             else:
-                # 正常检测中的短时丢脸继续保持上一次状态，
-                # 退出聊天后的旧帧则已由 epoch 检查丢弃。
                 self.ui_set_emotion.emit(
                     self.last_emotion,
                     (
@@ -1041,15 +1196,26 @@ class EmotionRobot(QObject):
 
                 robot_state.update_emotion(
                     emotion=self.last_emotion,
-                    confidence=self.last_emotion_prob,
+                    confidence=(
+                        self.last_emotion_prob
+                    ),
                     face_detected=False,
                 )
 
         return True
 
     @staticmethod
-    def _draw_face_boxes(display_frame, boxes):
-        for x1, y1, x2, y2, conf in boxes:
+    def _draw_face_boxes(
+        display_frame,
+        boxes,
+    ):
+        for (
+            x1,
+            y1,
+            x2,
+            y2,
+            conf,
+        ) in boxes:
             cv2.rectangle(
                 display_frame,
                 (x1, y1),
@@ -1060,7 +1226,10 @@ class EmotionRobot(QObject):
             cv2.putText(
                 display_frame,
                 f"{conf:.2f}",
-                (max(0, x1), max(20, y1 - 6)),
+                (
+                    max(0, x1),
+                    max(20, y1 - 6),
+                ),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.55,
                 (80, 230, 255),
@@ -1076,10 +1245,12 @@ class EmotionRobot(QObject):
             faces,
             key=lambda item: (
                 (
-                    item[2] - item[0]
+                    item[2]
+                    - item[0]
                 )
                 * (
-                    item[3] - item[1]
+                    item[3]
+                    - item[1]
                 ),
                 item[4],
             ),
@@ -1091,9 +1262,10 @@ class EmotionRobot(QObject):
                 time.sleep(0.1)
                 continue
 
-            # 本轮视觉处理所属的状态版本。
             with self.emotion_state_lock:
-                frame_epoch = self.emotion_state_epoch
+                frame_epoch = (
+                    self.emotion_state_epoch
+                )
 
             if (
                 self.cap is None
@@ -1126,9 +1298,15 @@ class EmotionRobot(QObject):
                     detected_boxes = (
                         self.face_detector.detect_face(
                             frame,
-                            img_size=cfg.FACE_IMG_SIZE,
-                            conf_threshold=cfg.FACE_CONF,
-                            iou_threshold=cfg.FACE_IOU,
+                            img_size=(
+                                cfg.FACE_IMG_SIZE
+                            ),
+                            conf_threshold=(
+                                cfg.FACE_CONF
+                            ),
+                            iou_threshold=(
+                                cfg.FACE_IOU
+                            ),
                         )
                     )
 
@@ -1151,7 +1329,8 @@ class EmotionRobot(QObject):
                         continue
 
                     boxes = list(
-                        self.last_face_boxes or []
+                        self.last_face_boxes
+                        or []
                     )
 
                 if not boxes:
@@ -1178,15 +1357,21 @@ class EmotionRobot(QObject):
                     boxes,
                 )
 
-                faces = self.face_detector.crop(
-                    frame,
-                    boxes,
-                    pad=cfg.FACE_PAD,
-                    extra_ratio=cfg.FACE_EXTRA_RATIO,
+                faces = (
+                    self.face_detector.crop(
+                        frame,
+                        boxes,
+                        pad=cfg.FACE_PAD,
+                        extra_ratio=(
+                            cfg.FACE_EXTRA_RATIO
+                        ),
+                    )
                 )
 
-                main_face = self._select_main_face(
-                    faces
+                main_face = (
+                    self._select_main_face(
+                        faces
+                    )
                 )
 
                 if main_face is None:
@@ -1199,38 +1384,53 @@ class EmotionRobot(QObject):
                     )
                     continue
 
-                _, _, _, _, _, face_image = main_face
+                (
+                    _x1,
+                    _y1,
+                    _x2,
+                    _y2,
+                    _conf,
+                    face_image,
+                ) = main_face
+
                 now = time.time()
 
                 if (
-                    now - self.last_emotion_infer_time
+                    now
+                    - self.last_emotion_infer_time
                     >= cfg.EMOTION_INFER_INTERVAL
                 ):
                     # 模型推理放在锁外，避免长时间阻塞 UI。
-                    raw_emotion, raw_prob = (
-                        self.emotion_cls.predict(
-                            face_image
-                        )
+                    (
+                        raw_emotion,
+                        raw_prob,
+                    ) = self.emotion_cls.predict(
+                        face_image
                     )
 
                     with self.emotion_state_lock:
-                        # 推理期间退出了聊天，本次结果作废。
                         if (
                             frame_epoch
                             != self.emotion_state_epoch
                         ):
                             continue
 
-                        self.last_emotion_infer_time = now
-
-                        emotion, prob = (
-                            self._smooth_emotion(
-                                raw_emotion,
-                                raw_prob,
-                            )
+                        self.last_emotion_infer_time = (
+                            now
                         )
 
-                        emotion, prob = (
+                        (
+                            emotion,
+                            prob,
+                        ) = self._smooth_emotion(
+                            raw_emotion,
+                            raw_prob,
+                        )
+
+                        (
+                            emotion,
+                            prob,
+                        ) = (
                             self._apply_special_emotion_lock(
                                 emotion,
                                 prob,
@@ -1244,7 +1444,8 @@ class EmotionRobot(QObject):
                         ):
                             print(
                                 "[当前表情] "
-                                f"{emotion} ({prob:.2f})",
+                                f"{emotion} "
+                                f"({prob:.2f})",
                                 flush=True,
                             )
                             self._last_print_emotion = (
@@ -1262,10 +1463,17 @@ class EmotionRobot(QObject):
                         ):
                             continue
 
-                        emotion = self.last_emotion
-                        prob = self.last_emotion_prob
+                        emotion = (
+                            self.last_emotion
+                        )
+                        prob = (
+                            self.last_emotion_prob
+                        )
 
-                        emotion, prob = (
+                        (
+                            emotion,
+                            prob,
+                        ) = (
                             self._apply_special_emotion_lock(
                                 emotion,
                                 prob,
@@ -1278,7 +1486,6 @@ class EmotionRobot(QObject):
                         )
 
                 with self.emotion_state_lock:
-                    # 最终提交前再次检查，堵住最后一个竞态窗口。
                     if (
                         frame_epoch
                         != self.emotion_state_epoch
@@ -1317,12 +1524,12 @@ class EmotionRobot(QObject):
 
             except Exception as exc:
                 print(
-                    f"[视觉] 单帧处理失败: {exc}",
+                    "[视觉] 单帧处理失败: "
+                    f"{exc}",
                     flush=True,
                 )
 
                 with self.emotion_state_lock:
-                    # 旧帧异常不应影响新会话。
                     if (
                         frame_epoch
                         == self.emotion_state_epoch
@@ -1346,7 +1553,9 @@ class EmotionRobot(QObject):
                             face_detected=False,
                         )
 
-            time.sleep(cfg.VISION_IDLE_SLEEP)
+            time.sleep(
+                cfg.VISION_IDLE_SLEEP
+            )
 
     def _start_vision(self):
         if self.vision_running:
@@ -1355,9 +1564,11 @@ class EmotionRobot(QObject):
         self.vision_running = True
         self.vision_pause.clear()
 
-        self.vision_thread = threading.Thread(
-            target=self._vision_loop,
-            daemon=True,
+        self.vision_thread = (
+            threading.Thread(
+                target=self._vision_loop,
+                daemon=True,
+            )
         )
         self.vision_thread.start()
 
@@ -1375,42 +1586,118 @@ class EmotionRobot(QObject):
             self.vision_thread
             and self.vision_thread.is_alive()
         ):
-            self.vision_thread.join(timeout=2)
+            self.vision_thread.join(
+                timeout=2
+            )
 
-        if self.cap and self.cap.isOpened():
+        if (
+            self.cap
+            and self.cap.isOpened()
+        ):
             self.cap.release()
 
     # =========================================================
     # TTS 子进程
     # =========================================================
+    def _start_tts_process_async(self):
+        """
+        在后台线程确保 TTS 已启动。
+
+        该函数本身立即返回，因此不会阻塞 PyQt UI 主线程。
+        """
+        threading.Thread(
+            target=self._start_tts_process,
+            name="tts-loader",
+            daemon=True,
+        ).start()
+
     def _start_tts_process(self):
-        if (
-            self.tts_proc is not None
-            and self.tts_proc.poll() is None
-        ):
-            return
+        """
+        确保 TTS worker 已启动，并返回可用 Popen 对象。
+
+        多个后台线程同时调用时，仅允许一个线程创建进程；
+        其他线程等待创建结束后复用同一个进程。
+        """
+        deadline = (
+            time.monotonic() + 60.0
+        )
+
+        with self.tts_start_cond:
+            while self.tts_starting:
+                remaining = (
+                    deadline
+                    - time.monotonic()
+                )
+
+                if remaining <= 0:
+                    print(
+                        "[TTS] 等待模型加载超时",
+                        flush=True,
+                    )
+                    return None
+
+                self.tts_start_cond.wait(
+                    timeout=min(
+                        0.5,
+                        remaining,
+                    )
+                )
+
+            proc = self.tts_proc
+
+            if (
+                proc is not None
+                and proc.poll() is None
+                and proc.stdin is not None
+                and proc.stdout is not None
+            ):
+                return proc
+
+            self.tts_proc = None
+            self.tts_starting = True
+            start_generation = (
+                self.tts_generation
+            )
+
+        proc = None
 
         try:
-            self.tts_proc = subprocess.Popen(
+            proc = subprocess.Popen(
                 [
-                    str(cfg.TTS_VENV_PYTHON),
-                    str(cfg.TTS_WORKER_PATH),
+                    str(
+                        cfg.TTS_VENV_PYTHON
+                    ),
+                    str(
+                        cfg.TTS_WORKER_PATH
+                    ),
                     "--model-dir",
-                    str(cfg.TTS_MODEL_DIR),
+                    str(
+                        cfg.TTS_MODEL_DIR
+                    ),
                     "--provider",
-                    str(cfg.TTS_PROVIDER),
+                    str(
+                        cfg.TTS_PROVIDER
+                    ),
                     "--threads",
-                    str(cfg.TTS_THREADS),
+                    str(
+                        cfg.TTS_THREADS
+                    ),
                     "--sid",
                     str(cfg.TTS_SID),
                     "--speed",
                     str(cfg.TTS_SPEED),
                     "--silence-scale",
-                    str(cfg.TTS_SILENCE_SCALE),
+                    str(
+                        cfg.TTS_SILENCE_SCALE
+                    ),
                     "--aplay-device",
-                    str(cfg.APLAY_DEVICE),
+                    str(
+                        cfg.APLAY_DEVICE
+                    ),
                     "--max-chars",
-                    str(cfg.TTS_MAX_CHARS),
+                    str(
+                        cfg.TTS_MAX_CHARS
+                    ),
                     "--warmup",
                     (
                         "1"
@@ -1430,50 +1717,175 @@ class EmotionRobot(QObject):
                 preexec_fn=os.setsid,
             )
 
+            # Popen 返回后立即登记。
+            # cleanup 可以在模型加载期间终止该进程。
+            with self.tts_process_lock:
+                if (
+                    start_generation
+                    != self.tts_generation
+                ):
+                    startup_cancelled = True
+                else:
+                    self.tts_proc = proc
+                    startup_cancelled = False
+
+            if startup_cancelled:
+                self._terminate_tts_process(
+                    proc
+                )
+                return None
+
+            if proc.stdout is None:
+                raise RuntimeError(
+                    "TTS 子进程 stdout 不可用"
+                )
+
+            # 只在后台线程等待 worker 的启动消息。
             startup_message = (
-                self.tts_proc.stdout.readline()
+                proc.stdout.readline()
             )
+
+            if not startup_message:
+                raise RuntimeError(
+                    "TTS 子进程未返回启动信息"
+                )
+
             print(
-                f"[TTS] {startup_message.strip()}",
+                "[TTS] "
+                f"{startup_message.strip()}",
                 flush=True,
             )
+
+            if proc.poll() is not None:
+                raise RuntimeError(
+                    "TTS 子进程启动后已退出，"
+                    f"returncode={proc.returncode}"
+                )
+
+            with self.tts_process_lock:
+                if (
+                    self.tts_proc is not proc
+                    or start_generation
+                    != self.tts_generation
+                ):
+                    return None
+
+            return proc
 
         except Exception as exc:
-            print(
-                "[Main] 无法启动 TTS 子进程: "
-                f"{exc}",
-                flush=True,
-            )
-            self.tts_proc = None
+            with self.tts_process_lock:
+                invalidated = (
+                    start_generation
+                    != self.tts_generation
+                )
 
-    def _cleanup_tts(self):
-        if self.tts_proc is None:
+            # cleanup 主动终止加载时，不打印误导性错误。
+            if not invalidated:
+                print(
+                    "[Main] 无法启动 "
+                    f"TTS 子进程: {exc}",
+                    flush=True,
+                )
+
+            self._terminate_tts_process(
+                proc
+            )
+
+            with self.tts_process_lock:
+                if self.tts_proc is proc:
+                    self.tts_proc = None
+
+            return None
+
+        finally:
+            with self.tts_start_cond:
+                self.tts_starting = False
+                self.tts_start_cond.notify_all()
+
+    @staticmethod
+    def _terminate_tts_process(proc):
+        """
+        终止指定 TTS 进程。
+
+        不直接读取或修改 self.tts_proc，防止并发覆盖。
+        """
+        if proc is None:
             return
 
         try:
-            os.killpg(
-                os.getpgid(self.tts_proc.pid),
-                signal.SIGTERM,
-            )
-            self.tts_proc.wait(timeout=1.5)
+            if proc.poll() is None:
+                os.killpg(
+                    os.getpgid(proc.pid),
+                    signal.SIGTERM,
+                )
+
+                try:
+                    proc.wait(timeout=1.5)
+                except subprocess.TimeoutExpired:
+                    os.killpg(
+                        os.getpgid(proc.pid),
+                        signal.SIGKILL,
+                    )
+                    proc.wait(timeout=0.5)
+
+        except ProcessLookupError:
+            pass
+
         except Exception:
             try:
-                os.killpg(
-                    os.getpgid(self.tts_proc.pid),
-                    signal.SIGKILL,
-                )
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait(timeout=0.5)
             except Exception:
                 pass
 
-        self.tts_proc = None
+        finally:
+            for stream in (
+                proc.stdin,
+                proc.stdout,
+            ):
+                try:
+                    if stream is not None:
+                        stream.close()
+                except Exception:
+                    pass
+
+    def _cleanup_tts(self):
+        """
+        安全摘除并终止当前 TTS 进程。
+
+        先把共享指针设为 None，再在锁外等待进程退出。
+        """
+        with self.tts_start_cond:
+            self.tts_generation += 1
+
+            proc = self.tts_proc
+            self.tts_proc = None
+
+            self.tts_start_cond.notify_all()
+
+        self._terminate_tts_process(
+            proc
+        )
 
     def _restart_tts_process(self):
-        self._cleanup_tts()
+        """
+        终止旧进程，并在后台重新预加载 TTS。
 
+        即使旧进程仍处于加载阶段，新线程也会等待旧启动流程
+        退出，然后再创建新进程。
+        """
+        self._cleanup_tts()
+        self._start_tts_process_async()
+
+    # =========================================================
+    # 任务取消和 TTS 播放
+    # =========================================================
     def _new_task_id(self):
         with self.task_lock:
             self.task_id += 1
             self.cancel_event.clear()
+
             return self.task_id
 
     def _cancel_all_running_tasks(self):
@@ -1485,20 +1897,32 @@ class EmotionRobot(QObject):
             self.voice_collector.stop_recording()
             self.is_recording = False
 
-        was_playing_tts = self.is_playing_tts
+        was_playing_tts = (
+            self.is_playing_tts
+        )
         self.is_playing_tts = False
 
         if was_playing_tts:
-            self._cleanup_tts()
+            # 中断播报后在后台重建，下一次不用冷启动。
+            self._restart_tts_process()
 
-    def _is_task_cancelled(self, task_id):
+    def _is_task_cancelled(
+        self,
+        task_id,
+    ):
         return (
             self.cancel_event.is_set()
             or task_id != self.task_id
         )
 
-    def _play_tts_text(self, text, task_id):
-        if self._is_task_cancelled(task_id):
+    def _play_tts_text(
+        self,
+        text,
+        task_id,
+    ):
+        if self._is_task_cancelled(
+            task_id
+        ):
             return
 
         text = str(text or "").strip()
@@ -1506,72 +1930,127 @@ class EmotionRobot(QObject):
         if not text:
             return
 
-        if (
-            self.tts_proc is None
-            or self.tts_proc.stdin is None
-            or self.tts_proc.poll() is not None
-        ):
-            self._start_tts_process()
+        # 一次完整播报独占 worker 的 stdin/stdout。
+        with self.tts_io_lock:
+            if self._is_task_cancelled(
+                task_id
+            ):
+                return
 
-        if (
-            self._is_task_cancelled(task_id)
-            or self.tts_proc is None
-            or self.tts_proc.stdin is None
-        ):
-            return
+            # 本函数运行于后台播放线程。
+            # 冷启动等待不会阻塞 UI 主线程。
+            proc = self._start_tts_process()
 
-        try:
-            self.tts_proc.stdin.write(
-                text + "\n"
-            )
-            self.tts_proc.stdin.flush()
-
-            while True:
-                if self._is_task_cancelled(task_id):
-                    self._restart_tts_process()
-                    return
-
-                line = self.tts_proc.stdout.readline()
-
-                if not line:
-                    break
-
-                if line.strip() == "TTS_DONE":
-                    break
-
-        except Exception as exc:
-            if not self._is_task_cancelled(task_id):
-                print(
-                    f"[TTS] 播放异常: {exc}",
-                    flush=True,
+            if (
+                self._is_task_cancelled(
+                    task_id
                 )
+                or proc is None
+                or proc.poll() is not None
+                or proc.stdin is None
+                or proc.stdout is None
+            ):
+                return
 
-    def _on_tts_start(self, text, task_id):
-        if self._is_task_cancelled(task_id):
+            try:
+                proc.stdin.write(
+                    text + "\n"
+                )
+                proc.stdin.flush()
+
+                while True:
+                    if (
+                        self._is_task_cancelled(
+                            task_id
+                        )
+                    ):
+                        self._restart_tts_process()
+                        return
+
+                    # 使用局部 proc。
+                    # cleanup 清空 self.tts_proc 后也不会
+                    # 产生 NoneType.stdout 并发异常。
+                    line = (
+                        proc.stdout.readline()
+                    )
+
+                    if not line:
+                        break
+
+                    if (
+                        line.strip()
+                        == "TTS_DONE"
+                    ):
+                        break
+
+            except (
+                BrokenPipeError,
+                OSError,
+                ValueError,
+            ) as exc:
+                if not self._is_task_cancelled(
+                    task_id
+                ):
+                    print(
+                        "[TTS] 播放异常: "
+                        f"{exc}",
+                        flush=True,
+                    )
+
+            except Exception as exc:
+                if not self._is_task_cancelled(
+                    task_id
+                ):
+                    print(
+                        "[TTS] 未知播放异常: "
+                        f"{exc}",
+                        flush=True,
+                    )
+
+    def _on_tts_start(
+        self,
+        text,
+        task_id,
+    ):
+        if self._is_task_cancelled(
+            task_id
+        ):
             return
 
         self.is_playing_tts = True
         self.ui_set_state_speaking.emit()
-        self.ui.record_button.setEnabled(False)
+        self.ui.record_button.setEnabled(
+            False
+        )
 
         def worker():
             self._play_tts_text(
                 text,
                 task_id,
             )
-            self.tts_stop.emit(task_id)
+            self.tts_stop.emit(
+                task_id
+            )
 
         threading.Thread(
             target=worker,
+            name=f"tts-play-{task_id}",
             daemon=True,
         ).start()
 
-    def _on_tts_stop(self, task_id):
-        if self._is_task_cancelled(task_id):
+    def _on_tts_stop(
+        self,
+        task_id,
+    ):
+        if self._is_task_cancelled(
+            task_id
+        ):
             return
 
         self.is_playing_tts = False
-        self.ui.record_button.setEnabled(True)
+        self.ui.record_button.setEnabled(
+            True
+        )
 
         if self.current_mode == "emotion":
             self.ui_set_state_emotion_detecting.emit()
@@ -1585,7 +2064,10 @@ class EmotionRobot(QObject):
         self.ui.clear_chat()
 
     def on_page_changed(self, page):
-        if page in ("robot", "face"):
+        if page in (
+            "robot",
+            "face",
+        ):
             self._resume_vision()
             return
 
@@ -1613,10 +2095,12 @@ class EmotionRobot(QObject):
 
         self.ui.set_state_listening()
 
-        self.rec_thread = threading.Thread(
-            target=self._record_thread,
-            args=(task_id,),
-            daemon=True,
+        self.rec_thread = (
+            threading.Thread(
+                target=self._record_thread,
+                args=(task_id,),
+                daemon=True,
+            )
         )
         self.rec_thread.start()
 
@@ -1636,31 +2120,23 @@ class EmotionRobot(QObject):
             flush=True,
         )
 
-        # 先暂停，不让视觉线程开启下一轮处理。
         self._pause_vision()
-
-        # 取消录音、LLM和TTS任务。
         self._cancel_all_running_tasks()
-
         self.llm_bot.history_clear()
 
         self.current_mode = "emotion"
         self.is_recording = False
         self.is_playing_tts = False
 
-        # 清除 active、pending、平滑窗口、锁、人脸框，
-        # 并让正在处理的旧帧失效。
         self._reset_all_emotion_state()
 
         self.ui_clear_chat.emit()
         self.ui_set_state_emotion_detecting.emit()
-
         self.ui_set_emotion.emit(
             "no_face",
             "",
             False,
         )
-
         self.ui_show_robot.emit()
 
         robot_state.update_emotion(
@@ -1682,7 +2158,8 @@ class EmotionRobot(QObject):
             self.ui,
             "确认退出",
             "确定要退出程序吗？",
-            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes
+            | QMessageBox.No,
             QMessageBox.No,
         )
 
@@ -1697,7 +2174,8 @@ class EmotionRobot(QObject):
 
         with self.emotion_wav_lock:
             if (
-                self.emotion_wav_proc is not None
+                self.emotion_wav_proc
+                is not None
                 and self.emotion_wav_proc.poll()
                 is None
             ):
@@ -1711,7 +2189,10 @@ class EmotionRobot(QObject):
     # =========================================================
     # 录音与 ASR
     # =========================================================
-    def _record_thread(self, task_id):
+    def _record_thread(
+        self,
+        task_id,
+    ):
         audio_path = None
 
         try:
@@ -1723,14 +2204,18 @@ class EmotionRobot(QObject):
                 )
             )
 
-            if self._is_task_cancelled(task_id):
+            if self._is_task_cancelled(
+                task_id
+            ):
                 return
 
             if not audio_path:
                 self.ui_append_system.emit(
                     "未检测到有效声音"
                 )
-                self._after_record_reset(task_id)
+                self._after_record_reset(
+                    task_id
+                )
                 return
 
             self._process_audio(
@@ -1739,7 +2224,9 @@ class EmotionRobot(QObject):
             )
 
         except Exception as exc:
-            if not self._is_task_cancelled(task_id):
+            if not self._is_task_cancelled(
+                task_id
+            ):
                 self.ui_append_system.emit(
                     f"录音错误: {exc}"
                 )
@@ -1750,20 +2237,29 @@ class EmotionRobot(QObject):
         finally:
             if (
                 audio_path
-                and os.path.exists(audio_path)
+                and os.path.exists(
+                    audio_path
+                )
             ):
                 try:
                     os.remove(audio_path)
                 except OSError:
                     pass
 
-            if not self._is_task_cancelled(task_id):
+            if not self._is_task_cancelled(
+                task_id
+            ):
                 self.is_recording = False
 
-    def _after_record_reset(self, task_id=None):
+    def _after_record_reset(
+        self,
+        task_id=None,
+    ):
         if (
             task_id is not None
-            and self._is_task_cancelled(task_id)
+            and self._is_task_cancelled(
+                task_id
+            )
         ):
             return
 
@@ -1775,8 +2271,14 @@ class EmotionRobot(QObject):
         else:
             self.ui_set_state_chatting.emit()
 
-    def _process_audio(self, audio_path, task_id):
-        if self._is_task_cancelled(task_id):
+    def _process_audio(
+        self,
+        audio_path,
+        task_id,
+    ):
+        if self._is_task_cancelled(
+            task_id
+        ):
             return
 
         user_text = (
@@ -1785,7 +2287,9 @@ class EmotionRobot(QObject):
             ).strip()
         )
 
-        if self._is_task_cancelled(task_id):
+        if self._is_task_cancelled(
+            task_id
+        ):
             return
 
         print(
@@ -1796,11 +2300,14 @@ class EmotionRobot(QObject):
         robot_state.add_chat(
             role="user",
             content=user_text,
-            emotion=robot_state.current_emotion,
+            emotion=(
+                robot_state.current_emotion
+            ),
         )
 
         if (
-            len(user_text) < cfg.MIN_TEXT_LEN
+            len(user_text)
+            < cfg.MIN_TEXT_LEN
             or not self._is_valid_chinese(
                 user_text
             )
@@ -1808,7 +2315,9 @@ class EmotionRobot(QObject):
             self.ui_append_system.emit(
                 "未识别到有效文本，请重试"
             )
-            self._after_record_reset(task_id)
+            self._after_record_reset(
+                task_id
+            )
             return
 
         if self.current_mode == "emotion":
@@ -1820,8 +2329,12 @@ class EmotionRobot(QObject):
                     self.pending_strong_confidence
                 )
 
-                self.pending_strong_emotion = None
-                self.pending_strong_confidence = 0
+                self.pending_strong_emotion = (
+                    None
+                )
+                self.pending_strong_confidence = (
+                    0
+                )
 
                 self._enter_chat_with_emotion(
                     user_text,
@@ -1849,24 +2362,35 @@ class EmotionRobot(QObject):
     ):
         self.current_mode = "chat"
 
-        emotion_key = normalize_emotion_key(
-            emotion
+        emotion_key = (
+            normalize_emotion_key(
+                emotion
+            )
         )
 
-        if emotion_key in SPECIAL_EMOTIONS:
-            self.active_emotion = emotion_key
+        if (
+            emotion_key
+            in SPECIAL_EMOTIONS
+        ):
+            self.active_emotion = (
+                emotion_key
+            )
             self.active_emotion_confidence = (
                 emotion_confidence
             )
         else:
             self.active_emotion = None
-            self.active_emotion_confidence = 0
+            self.active_emotion_confidence = (
+                0
+            )
 
         self.llm_bot.history_clear()
         self.ui_clear_chat.emit()
         self.ui_show_chat.emit()
         self.ui_set_state_thinking.emit()
-        self.ui_append_user.emit(user_text)
+        self.ui_append_user.emit(
+            user_text
+        )
 
         self._generate_ai_reply(
             user_text,
@@ -1889,7 +2413,9 @@ class EmotionRobot(QObject):
         self.ui_clear_chat.emit()
         self.ui_show_chat.emit()
         self.ui_set_state_thinking.emit()
-        self.ui_append_user.emit(user_text)
+        self.ui_append_user.emit(
+            user_text
+        )
 
         self._generate_ai_reply(
             user_text,
@@ -1901,7 +2427,9 @@ class EmotionRobot(QObject):
         user_text,
         task_id,
     ):
-        self.ui_append_user.emit(user_text)
+        self.ui_append_user.emit(
+            user_text
+        )
         self.ui_set_state_thinking.emit()
 
         self._generate_ai_reply(
@@ -1935,7 +2463,9 @@ class EmotionRobot(QObject):
                     "face_detected",
                     False,
                 ),
-                active_emotion=emotion_override,
+                active_emotion=(
+                    emotion_override
+                ),
                 active_confidence=(
                     self.active_emotion_confidence
                     if emotion_override
@@ -1949,8 +2479,9 @@ class EmotionRobot(QObject):
             "[LLM提示] "
             f"mode={info.get('mode')}, "
             f"emotion={info.get('emotion')}, "
-            f"confidence={info.get('confidence')}, "
-            f"face_detected="
+            f"confidence="
+            f"{info.get('confidence')}, "
+            "face_detected="
             f"{info.get('face_detected')}, "
             f"source={info.get('source')}",
             flush=True,
@@ -1991,7 +2522,9 @@ class EmotionRobot(QObject):
         emotion_override=None,
     ):
         def worker():
-            if self._is_task_cancelled(task_id):
+            if self._is_task_cancelled(
+                task_id
+            ):
                 return
 
             try:
@@ -2005,44 +2538,65 @@ class EmotionRobot(QObject):
 
                 reply = (
                     self.llm_bot.chat_ollama(
-                        user_message=user_text,
-                        system_prompt=system_prompt,
+                        user_message=(
+                            user_text
+                        ),
+                        system_prompt=(
+                            system_prompt
+                        ),
                     ).strip()
                 )
 
-                if self._is_task_cancelled(task_id):
+                if self._is_task_cancelled(
+                    task_id
+                ):
                     return
 
                 if not reply:
-                    reply = self._fallback_reply(
+                    reply = (
+                        self._fallback_reply(
+                            user_text=(
+                                user_text
+                            ),
+                            emotion_override=(
+                                emotion_override
+                            ),
+                        )
+                    )
+
+            except Exception as exc:
+                if self._is_task_cancelled(
+                    task_id
+                ):
+                    return
+
+                print(
+                    "[LLM 错误] "
+                    f"{type(exc).__name__}: "
+                    f"{exc}",
+                    flush=True,
+                )
+
+                reply = (
+                    self._fallback_reply(
                         user_text=user_text,
                         emotion_override=(
                             emotion_override
                         ),
                     )
-
-            except Exception as exc:
-                if self._is_task_cancelled(task_id):
-                    return
-
-                print(
-                    "[LLM 错误] "
-                    f"{type(exc).__name__}: {exc}",
-                    flush=True,
                 )
 
-                reply = self._fallback_reply(
-                    user_text=user_text,
-                    emotion_override=emotion_override,
-                )
-
-            if self._is_task_cancelled(task_id):
+            if self._is_task_cancelled(
+                task_id
+            ):
                 return
 
             robot_state.add_chat(
                 role="robot",
                 content=reply,
-                emotion=robot_state.current_emotion,
+                emotion=(
+                    robot_state.current_emotion
+                ),
             )
 
             self.ui_append_ai.emit(reply)
@@ -2059,16 +2613,23 @@ class EmotionRobot(QObject):
     # =========================================================
     # 预置情绪提示音与初始化音
     # =========================================================
-    def _play_emotion_wav_async(self, emotion):
+    def _play_emotion_wav_async(
+        self,
+        emotion,
+    ):
         threading.Thread(
             target=self._play_emotion_wav,
             args=(emotion,),
             daemon=True,
         ).start()
 
-    def _play_emotion_wav(self, emotion):
+    def _play_emotion_wav(
+        self,
+        emotion,
+    ):
         wav_name = (
-            str(emotion).lower() + ".wav"
+            str(emotion).lower()
+            + ".wav"
         )
         wav_path = (
             Path(cfg.EMOTION_WAV_DIR)
@@ -2077,7 +2638,8 @@ class EmotionRobot(QObject):
 
         if not wav_path.exists():
             print(
-                f"[情绪语音] 文件不存在: {wav_path}",
+                "[情绪语音] 文件不存在: "
+                f"{wav_path}",
                 flush=True,
             )
             return
@@ -2085,7 +2647,8 @@ class EmotionRobot(QObject):
         with self.emotion_wav_lock:
             try:
                 if (
-                    self.emotion_wav_proc is not None
+                    self.emotion_wav_proc
+                    is not None
                     and self.emotion_wav_proc.poll()
                     is None
                 ):
@@ -2096,17 +2659,24 @@ class EmotionRobot(QObject):
                         [
                             "aplay",
                             "-D",
-                            str(cfg.APLAY_DEVICE),
+                            str(
+                                cfg.APLAY_DEVICE
+                            ),
                             str(wav_path),
                         ],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
+                        stdout=(
+                            subprocess.DEVNULL
+                        ),
+                        stderr=(
+                            subprocess.DEVNULL
+                        ),
                     )
                 )
 
             except Exception as exc:
                 print(
-                    f"[情绪语音] 播放失败: {exc}",
+                    "[情绪语音] 播放失败: "
+                    f"{exc}",
                     flush=True,
                 )
 
@@ -2130,7 +2700,8 @@ class EmotionRobot(QObject):
             )
         except Exception as exc:
             print(
-                f"[初始化语音] 播放失败: {exc}",
+                "[初始化语音] 播放失败: "
+                f"{exc}",
                 flush=True,
             )
 
@@ -2147,16 +2718,21 @@ class EmotionRobot(QObject):
         chinese_count = sum(
             1
             for char in text
-            if "\u4e00" <= char <= "\u9fff"
+            if "\u4e00"
+            <= char
+            <= "\u9fff"
         )
 
         return (
-            chinese_count / len(text)
+            chinese_count
+            / len(text)
             >= cfg.VALID_CHINESE_RATIO
         )
 
     def run(self):
-        sys.exit(self.app.exec_())
+        sys.exit(
+            self.app.exec_()
+        )
 
 
 if __name__ == "__main__":
