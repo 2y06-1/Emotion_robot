@@ -1,41 +1,48 @@
-import sys
 import html
+import sys
+from typing import Optional
 
-from PyQt5.QtWidgets import (
-    QApplication,
-    QWidget,
-    QLabel,
-    QPushButton,
-    QVBoxLayout,
-    QHBoxLayout,
-    QFrame,
-    QSizePolicy,
-    QStackedWidget,
-    QScrollArea,
-)
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QRectF
+from PyQt5.QtCore import QRectF, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import (
+    QBrush,
     QColor,
+    QImage,
     QPainter,
     QPen,
-    QBrush,
-    QRadialGradient,
     QPixmap,
-    QImage,
+    QRadialGradient,
 )
+from PyQt5.QtWidgets import (
+    QApplication,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QStackedWidget,
+    QVBoxLayout,
+    QWidget,
+)
+
+# 兼容两种启动方式：
+# 1. 作为 src.ui 包导入；
+# 2. main.py 把 src/ui 加入 sys.path 后，直接 from ui import MainWindow。
+try:
+    from .performance_page import PerformancePage
+except ImportError:
+    from performance_page import PerformancePage
 
 
 class RobotEyesWidget(QWidget):
-    """
-    第一个 UI：纯黑背景 + 一组发光机器人眼睛。
-    这个页面保持极简，只通过眼睛表达机器人状态。
-    """
+    """第一个 UI：纯黑背景和一组发光机器人眼睛。"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.emotion = "no_face"
         self.strong = False
         self.tick = 0
+
         self.setMinimumSize(800, 480)
 
         self.timer = QTimer(self)
@@ -46,23 +53,29 @@ class RobotEyesWidget(QWidget):
         key = (emotion or "no_face").lower()
         if key in ["--", "none", "unknown"]:
             key = "no_face"
+
         self.emotion = key
-        self.strong = strong
+        self.strong = bool(strong)
         self.update()
 
     def _animate(self):
         self.tick = (self.tick + 1) % 120
         self.update()
 
-    def paintEvent(self, event):
+    def paintEvent(self, event):  # noqa: N802 - Qt 命名约定
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
 
         w = self.width()
         h = self.height()
+
         painter.fillRect(self.rect(), QColor(0, 0, 0))
 
-        glow = QRadialGradient(w * 0.5, h * 0.36, min(w, h) * 0.58)
+        glow = QRadialGradient(
+            w * 0.5,
+            h * 0.36,
+            min(w, h) * 0.58,
+        )
         glow.setColorAt(0.0, QColor(0, 135, 210, 28))
         glow.setColorAt(0.58, QColor(0, 45, 95, 9))
         glow.setColorAt(1.0, QColor(0, 0, 0, 0))
@@ -82,30 +95,118 @@ class RobotEyesWidget(QWidget):
         eye_h = min(h * 0.22, 108) * breath
 
         if self.emotion == "happy":
-            self._draw_smile_eye(painter, cx - gap, cy, eye_w * 1.18, eye_h * 0.58)
-            self._draw_smile_eye(painter, cx + gap, cy, eye_w * 1.18, eye_h * 0.58)
+            self._draw_smile_eye(
+                painter,
+                cx - gap,
+                cy,
+                eye_w * 1.18,
+                eye_h * 0.58,
+            )
+            self._draw_smile_eye(
+                painter,
+                cx + gap,
+                cy,
+                eye_w * 1.18,
+                eye_h * 0.58,
+            )
         elif self.emotion == "sad":
-            self._draw_sad_eye(painter, cx - gap, cy + 8, eye_w * 1.08, eye_h * 0.55)
-            self._draw_sad_eye(painter, cx + gap, cy + 8, eye_w * 1.08, eye_h * 0.55)
+            self._draw_sad_eye(
+                painter,
+                cx - gap,
+                cy + 8,
+                eye_w * 1.08,
+                eye_h * 0.55,
+            )
+            self._draw_sad_eye(
+                painter,
+                cx + gap,
+                cy + 8,
+                eye_w * 1.08,
+                eye_h * 0.55,
+            )
         elif self.emotion == "angry":
-            self._draw_bar_eye(painter, cx - gap, cy, eye_w * 1.10, eye_h * 0.34, -14)
-            self._draw_bar_eye(painter, cx + gap, cy, eye_w * 1.10, eye_h * 0.34, 14)
+            self._draw_bar_eye(
+                painter,
+                cx - gap,
+                cy,
+                eye_w * 1.10,
+                eye_h * 0.34,
+                -14,
+            )
+            self._draw_bar_eye(
+                painter,
+                cx + gap,
+                cy,
+                eye_w * 1.10,
+                eye_h * 0.34,
+                14,
+            )
         elif self.emotion == "surprise":
-            self._draw_oval_eye(painter, cx - gap, cy, eye_w * 1.02, eye_h * 1.18)
-            self._draw_oval_eye(painter, cx + gap, cy, eye_w * 1.02, eye_h * 1.18)
+            self._draw_oval_eye(
+                painter,
+                cx - gap,
+                cy,
+                eye_w * 1.02,
+                eye_h * 1.18,
+            )
+            self._draw_oval_eye(
+                painter,
+                cx + gap,
+                cy,
+                eye_w * 1.02,
+                eye_h * 1.18,
+            )
         elif self.emotion == "neutral":
-            self._draw_oval_eye(painter, cx - gap, cy, eye_w, eye_h * 0.95)
-            self._draw_oval_eye(painter, cx + gap, cy, eye_w, eye_h * 0.95)
+            self._draw_oval_eye(
+                painter,
+                cx - gap,
+                cy,
+                eye_w,
+                eye_h * 0.95,
+            )
+            self._draw_oval_eye(
+                painter,
+                cx + gap,
+                cy,
+                eye_w,
+                eye_h * 0.95,
+            )
         else:
-            self._draw_oval_eye(painter, cx - gap, cy, eye_w * 0.62, eye_h * 0.74, dim=True)
-            self._draw_oval_eye(painter, cx + gap, cy, eye_w * 0.62, eye_h * 0.74, dim=True)
+            self._draw_oval_eye(
+                painter,
+                cx - gap,
+                cy,
+                eye_w * 0.62,
+                eye_h * 0.74,
+                dim=True,
+            )
+            self._draw_oval_eye(
+                painter,
+                cx + gap,
+                cy,
+                eye_w * 0.62,
+                eye_h * 0.74,
+                dim=True,
+            )
 
     def _eye_colors(self, dim=False):
         if dim:
-            return QColor(55, 190, 235), QColor(0, 120, 210), QColor(0, 45, 110)
+            return (
+                QColor(55, 190, 235),
+                QColor(0, 120, 210),
+                QColor(0, 45, 110),
+            )
         if self.strong:
-            return QColor(145, 255, 255), QColor(0, 220, 255), QColor(0, 100, 255)
-        return QColor(100, 240, 255), QColor(0, 178, 255), QColor(0, 82, 230)
+            return (
+                QColor(145, 255, 255),
+                QColor(0, 220, 255),
+                QColor(0, 100, 255),
+            )
+        return (
+            QColor(100, 240, 255),
+            QColor(0, 178, 255),
+            QColor(0, 82, 230),
+        )
 
     def _draw_eye_glow(self, painter, x, y, ew, eh, dim=False):
         core, mid, outer = self._eye_colors(dim)
@@ -116,22 +217,81 @@ class RobotEyesWidget(QWidget):
             grow_y = i * eh * 0.10
             alpha = 7 + i * (3 if dim else 5)
             painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor(outer.red(), outer.green(), outer.blue(), alpha))
-            painter.drawRoundedRect(rect.adjusted(-grow_x, -grow_y, grow_x, grow_y), ew, ew)
+            painter.setBrush(
+                QColor(
+                    outer.red(),
+                    outer.green(),
+                    outer.blue(),
+                    alpha,
+                )
+            )
+            painter.drawRoundedRect(
+                rect.adjusted(
+                    -grow_x,
+                    -grow_y,
+                    grow_x,
+                    grow_y,
+                ),
+                ew,
+                ew,
+            )
 
-        grad = QRadialGradient(x, y - eh * 0.18, max(ew, eh) * 0.75)
-        grad.setColorAt(0.0, QColor(core.red(), core.green(), core.blue(), 255 if not dim else 210))
-        grad.setColorAt(0.45, QColor(mid.red(), mid.green(), mid.blue(), 230 if not dim else 170))
-        grad.setColorAt(1.0, QColor(outer.red(), outer.green(), outer.blue(), 45 if not dim else 24))
+        grad = QRadialGradient(
+            x,
+            y - eh * 0.18,
+            max(ew, eh) * 0.75,
+        )
+        grad.setColorAt(
+            0.0,
+            QColor(
+                core.red(),
+                core.green(),
+                core.blue(),
+                255 if not dim else 210,
+            ),
+        )
+        grad.setColorAt(
+            0.45,
+            QColor(
+                mid.red(),
+                mid.green(),
+                mid.blue(),
+                230 if not dim else 170,
+            ),
+        )
+        grad.setColorAt(
+            1.0,
+            QColor(
+                outer.red(),
+                outer.green(),
+                outer.blue(),
+                45 if not dim else 24,
+            ),
+        )
+
         painter.setBrush(QBrush(grad))
         painter.setPen(Qt.NoPen)
         painter.drawRoundedRect(rect, ew / 2, ew / 2)
 
-        highlight = QRadialGradient(x - ew * 0.18, y - eh * 0.22, ew * 0.28)
-        highlight.setColorAt(0.0, QColor(220, 255, 255, 115 if not dim else 60))
+        highlight = QRadialGradient(
+            x - ew * 0.18,
+            y - eh * 0.22,
+            ew * 0.28,
+        )
+        highlight.setColorAt(
+            0.0,
+            QColor(220, 255, 255, 115 if not dim else 60),
+        )
         highlight.setColorAt(1.0, QColor(220, 255, 255, 0))
         painter.setBrush(QBrush(highlight))
-        painter.drawEllipse(QRectF(x - ew * 0.34, y - eh * 0.38, ew * 0.34, eh * 0.28))
+        painter.drawEllipse(
+            QRectF(
+                x - ew * 0.34,
+                y - eh * 0.38,
+                ew * 0.34,
+                eh * 0.28,
+            )
+        )
 
     def _draw_oval_eye(self, painter, x, y, ew, eh, dim=False):
         self._draw_eye_glow(painter, x, y, ew, eh, dim)
@@ -147,44 +307,82 @@ class RobotEyesWidget(QWidget):
         core, _, _ = self._eye_colors(False)
         painter.save()
         rect = QRectF(x - ew / 2, y - eh / 2, ew, eh)
+
         for width, alpha in [(20, 22), (14, 38), (9, 220)]:
-            painter.setPen(QPen(QColor(core.red(), core.green(), core.blue(), alpha), width, Qt.SolidLine, Qt.RoundCap))
+            painter.setPen(
+                QPen(
+                    QColor(
+                        core.red(),
+                        core.green(),
+                        core.blue(),
+                        alpha,
+                    ),
+                    width,
+                    Qt.SolidLine,
+                    Qt.RoundCap,
+                )
+            )
             painter.setBrush(Qt.NoBrush)
             painter.drawArc(rect, 25 * 16, 130 * 16)
+
         painter.restore()
 
     def _draw_sad_eye(self, painter, x, y, ew, eh):
         core, _, _ = self._eye_colors(False)
         painter.save()
         rect = QRectF(x - ew / 2, y - eh / 2, ew, eh)
+
         for width, alpha in [(20, 20), (14, 36), (9, 215)]:
-            painter.setPen(QPen(QColor(core.red(), core.green(), core.blue(), alpha), width, Qt.SolidLine, Qt.RoundCap))
+            painter.setPen(
+                QPen(
+                    QColor(
+                        core.red(),
+                        core.green(),
+                        core.blue(),
+                        alpha,
+                    ),
+                    width,
+                    Qt.SolidLine,
+                    Qt.RoundCap,
+                )
+            )
             painter.setBrush(Qt.NoBrush)
             painter.drawArc(rect, 205 * 16, 130 * 16)
+
         painter.restore()
 
 
 class SoftGlowPage(QWidget):
-    """黑色柔光背景页，用于聊天页和表情页。"""
+    """聊天页和表情页共用的深色柔光背景。"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAutoFillBackground(False)
 
-    def paintEvent(self, event):
+    def paintEvent(self, event):  # noqa: N802 - Qt 命名约定
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
+
         w = self.width()
         h = self.height()
+
         painter.fillRect(self.rect(), QColor(3, 7, 12))
 
-        glow1 = QRadialGradient(w * 0.20, h * 0.10, min(w, h) * 0.70)
+        glow1 = QRadialGradient(
+            w * 0.20,
+            h * 0.10,
+            min(w, h) * 0.70,
+        )
         glow1.setColorAt(0.0, QColor(0, 115, 255, 45))
         glow1.setColorAt(0.55, QColor(0, 60, 150, 13))
         glow1.setColorAt(1.0, QColor(0, 0, 0, 0))
         painter.fillRect(self.rect(), QBrush(glow1))
 
-        glow2 = QRadialGradient(w * 0.86, h * 0.76, min(w, h) * 0.58)
+        glow2 = QRadialGradient(
+            w * 0.86,
+            h * 0.76,
+            min(w, h) * 0.58,
+        )
         glow2.setColorAt(0.0, QColor(0, 210, 255, 28))
         glow2.setColorAt(0.60, QColor(0, 80, 120, 10))
         glow2.setColorAt(1.0, QColor(0, 0, 0, 0))
@@ -199,11 +397,13 @@ class ChatBubble(QFrame):
     def __init__(self, text, role="robot", parent=None):
         super().__init__(parent)
         self.role = role
-        self.setObjectName({
-            "user": "userBubble",
-            "robot": "robotBubble",
-            "system": "systemBubble",
-        }.get(role, "robotBubble"))
+        self.setObjectName(
+            {
+                "user": "userBubble",
+                "robot": "robotBubble",
+                "system": "systemBubble",
+            }.get(role, "robotBubble")
+        )
 
         layout = QVBoxLayout(self)
         if role == "system":
@@ -217,9 +417,7 @@ class ChatBubble(QFrame):
             name.setObjectName("bubbleName")
             layout.addWidget(name)
 
-        # 这里只做普通文本显示。
-        # 原来使用 html.escape(text)，会把英文双引号转成 &quot;，
-        # QLabel 按普通文本显示时就会直接看到 &quot;。
+        # 只按普通文本显示，避免把 &quot; 等 HTML 实体直接显示出来。
         display_text = html.unescape(str(text or ""))
         label = QLabel(display_text)
         label.setTextFormat(Qt.PlainText)
@@ -231,27 +429,40 @@ class ChatBubble(QFrame):
 
 
 class MainWindow(QWidget):
-    """
-    三个界面：
-    1. 机器人动态表情页
-    2. 极简聊天页
-    3. 用户表情检测页
-    """
+    """Emotion Robot 的四页主窗口。"""
 
     record_button_clicked = pyqtSignal()
     exit_chat_clicked = pyqtSignal()
     exit_program_clicked = pyqtSignal()
-    page_changed = pyqtSignal(str)  # robot / chat / face
+    page_changed = pyqtSignal(str)  # robot / chat / face / performance
+
+    # 只把四类明显情绪直接显示给评委。
+    _VISIBLE_EMOTIONS = {"angry", "happy", "sad", "surprise"}
+    _EMOTION_TEXT = {
+        "angry": "生气",
+        "happy": "开心",
+        "sad": "难过",
+        "surprise": "惊讶",
+    }
 
     def __init__(self):
         super().__init__()
+
         self.current_state = "emotion"
         self.current_page = "robot"
         self.is_recording = False
         self._message_count = 0
 
+        # 聊天页心情显示状态。
+        # _live_emotion_key：视觉线程持续更新的实时稳定情绪；
+        # _chat_locked_emotion_key：本轮真正传给 LLM 的锁定情绪。
+        self._live_emotion_key = "no_face"
+        self._chat_locked_emotion_key: Optional[str] = None
+        self._chat_emotion_locked = False
+
         self.setWindowTitle("Emotion Robot")
         self.setMinimumSize(800, 480)
+
         self._build_ui()
         self._connect_signals()
 
@@ -259,21 +470,28 @@ class MainWindow(QWidget):
         self.set_emotion("no_face", "", False)
         self.show_robot_ui()
 
-    # ---------- UI 构建 ----------
+    # ------------------------------------------------------------------
+    # UI 构建
+    # ------------------------------------------------------------------
     def _build_ui(self):
         self.setStyleSheet(self._style_sheet())
+
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
         self.stack = QStackedWidget()
+
         self.robot_page = self._build_robot_page()
         self.chat_page = self._build_chat_page()
         self.face_page = self._build_face_page()
+        self.performance_page = PerformancePage()
 
         self.stack.addWidget(self.robot_page)
         self.stack.addWidget(self.chat_page)
         self.stack.addWidget(self.face_page)
+        self.stack.addWidget(self.performance_page)
+
         root.addWidget(self.stack)
 
     def _build_robot_page(self):
@@ -290,7 +508,11 @@ class MainWindow(QWidget):
         self.enter_hint_label = QLabel("双击进入聊天", page)
         self.enter_hint_label.setObjectName("enterHintLabel")
         self.enter_hint_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.enter_hint_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.enter_hint_label.setAttribute(
+            Qt.WA_TransparentForMouseEvents,
+            True,
+        )
+
         return page
 
     def _build_chat_page(self):
@@ -298,32 +520,61 @@ class MainWindow(QWidget):
         page.setObjectName("chatPage")
 
         root = QVBoxLayout(page)
-        root.setContentsMargins(26, 20, 26, 22)
-        root.setSpacing(12)
+        root.setContentsMargins(26, 16, 26, 20)
+        root.setSpacing(10)
 
-        # 顶部：只保留标题、状态和一个弱提示，不再像软件后台。
+        # 顶部左侧：标题。
         top_bar = QHBoxLayout()
         top_bar.setSpacing(12)
 
         title_box = QVBoxLayout()
-        title_box.setSpacing(2)
+        title_box.setSpacing(1)
+
         self.title_label = QLabel("和我聊聊")
         self.title_label.setObjectName("titleLabel")
+
         self.subtitle_label = QLabel("我会认真听你说")
         self.subtitle_label.setObjectName("subtitleLabel")
+
         title_box.addWidget(self.title_label)
         title_box.addWidget(self.subtitle_label)
+
+        # 顶部中间：当前交互状态与当前/本轮情绪。
+        state_box = QVBoxLayout()
+        state_box.setSpacing(3)
 
         self.status_label = QLabel("可以继续说")
         self.status_label.setObjectName("statusLabel")
         self.status_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
-        top_bar.addLayout(title_box, 1)
-        top_bar.addWidget(self.status_label, 1)
+        self.chat_emotion_label = QLabel(
+            "用户当前心情：未检测到明显情绪"
+        )
+        self.chat_emotion_label.setObjectName("chatEmotionLabel")
+        self.chat_emotion_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.chat_emotion_label.setMinimumWidth(235)
 
-        # 中间：无明显外框的对话区域，只显示气泡。
+        state_box.addWidget(self.status_label)
+        state_box.addWidget(self.chat_emotion_label)
+
+        # 顶部右侧：性能页入口。
+        self.system_status_button = QPushButton("系统状态")
+        self.system_status_button.setObjectName("systemStatusButton")
+        self.system_status_button.setCursor(Qt.PointingHandCursor)
+        self.system_status_button.setFixedSize(108, 48)
+
+        top_bar.addLayout(title_box, 1)
+        top_bar.addLayout(state_box, 1)
+        top_bar.addWidget(
+            self.system_status_button,
+            0,
+            Qt.AlignRight | Qt.AlignVCenter,
+        )
+
+        # 中间：聊天气泡区域。
         self.chat_panel = QFrame()
         self.chat_panel.setObjectName("chatPanel")
+
         panel_layout = QVBoxLayout(self.chat_panel)
         panel_layout.setContentsMargins(10, 4, 10, 4)
         panel_layout.setSpacing(0)
@@ -337,6 +588,7 @@ class MainWindow(QWidget):
 
         self.chat_content = QWidget()
         self.chat_content.setObjectName("chatContent")
+
         self.chat_layout = QVBoxLayout(self.chat_content)
         self.chat_layout.setContentsMargins(4, 4, 4, 4)
         self.chat_layout.setSpacing(10)
@@ -345,6 +597,7 @@ class MainWindow(QWidget):
         self.empty_hint_label.setObjectName("emptyHintLabel")
         self.empty_hint_label.setAlignment(Qt.AlignCenter)
         self.empty_hint_label.setWordWrap(True)
+
         self.chat_layout.addStretch(1)
         self.chat_layout.addWidget(self.empty_hint_label)
         self.chat_layout.addStretch(1)
@@ -352,18 +605,18 @@ class MainWindow(QWidget):
         self.chat_scroll.setWidget(self.chat_content)
         panel_layout.addWidget(self.chat_scroll, 1)
 
-        # 底部：只保留主操作按钮和弱化的结束聊天按钮。
+        # 底部：主操作按钮和结束聊天按钮。
         bottom_bar = QHBoxLayout()
         bottom_bar.setSpacing(14)
 
         self.record_button = QPushButton("开始说话")
         self.record_button.setObjectName("recordButton")
-        self.record_button.setMinimumHeight(74)
+        self.record_button.setMinimumHeight(70)
         self.record_button.setCursor(Qt.PointingHandCursor)
 
         self.exit_chat_button = QPushButton("结束聊天")
         self.exit_chat_button.setObjectName("exitChatButton")
-        self.exit_chat_button.setMinimumHeight(74)
+        self.exit_chat_button.setMinimumHeight(70)
         self.exit_chat_button.setCursor(Qt.PointingHandCursor)
         self.exit_chat_button.hide()
 
@@ -373,6 +626,7 @@ class MainWindow(QWidget):
         root.addLayout(top_bar)
         root.addWidget(self.chat_panel, 1)
         root.addLayout(bottom_bar)
+
         return page
 
     def _build_face_page(self):
@@ -383,7 +637,7 @@ class MainWindow(QWidget):
         root.setContentsMargins(24, 18, 24, 20)
         root.setSpacing(12)
 
-        # 顶部：只保留页面名称和返回提示，避免像调试后台。
+        # 顶部。
         top_bar = QHBoxLayout()
         top_bar.setSpacing(12)
 
@@ -397,9 +651,10 @@ class MainWindow(QWidget):
         top_bar.addWidget(self.face_title_label, 1)
         top_bar.addWidget(self.face_status_label, 1)
 
-        # 中间：摄像头画面占主要空间，不再右侧放大卡片。
+        # 摄像头画面。
         self.face_preview_card = QFrame()
         self.face_preview_card.setObjectName("facePreviewCard")
+
         preview_layout = QVBoxLayout(self.face_preview_card)
         preview_layout.setContentsMargins(12, 12, 12, 12)
         preview_layout.setSpacing(0)
@@ -409,11 +664,13 @@ class MainWindow(QWidget):
         self.face_image_label.setAlignment(Qt.AlignCenter)
         self.face_image_label.setMinimumSize(680, 300)
         self.face_image_label.setScaledContents(False)
+
         preview_layout.addWidget(self.face_image_label, 1)
 
-        # 底部：情绪结果条。比右侧大卡片更省空间，也更像产品界面。
+        # 底部情绪结果条。
         self.face_result_bar = QFrame()
         self.face_result_bar.setObjectName("faceResultBar")
+
         result_layout = QHBoxLayout(self.face_result_bar)
         result_layout.setContentsMargins(22, 8, 22, 8)
         result_layout.setSpacing(14)
@@ -432,7 +689,9 @@ class MainWindow(QWidget):
 
         self.user_emotion_prob_label = QLabel("请正对摄像头")
         self.user_emotion_prob_label.setObjectName("userEmotionProbLabel")
-        self.user_emotion_prob_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.user_emotion_prob_label.setAlignment(
+            Qt.AlignLeft | Qt.AlignVCenter
+        )
 
         text_box.addWidget(self.user_emotion_name_label)
         text_box.addWidget(self.user_emotion_prob_label)
@@ -448,16 +707,24 @@ class MainWindow(QWidget):
         root.addLayout(top_bar)
         root.addWidget(self.face_preview_card, 1)
         root.addWidget(self.face_result_bar, 0)
+
         return page
 
-    # ---------- 信号连接 ----------
+    # ------------------------------------------------------------------
+    # 信号连接
+    # ------------------------------------------------------------------
     def _connect_signals(self):
         self.record_button.clicked.connect(self._on_record_button_clicked)
         self.exit_chat_button.clicked.connect(self.exit_chat_clicked.emit)
+        self.system_status_button.clicked.connect(self.show_performance_ui)
+        self.performance_page.back_clicked.connect(self.show_chat_ui)
 
-    # ---------- 页面切换 ----------
-    def resizeEvent(self, event):
+    # ------------------------------------------------------------------
+    # 页面切换
+    # ------------------------------------------------------------------
+    def resizeEvent(self, event):  # noqa: N802 - Qt 命名约定
         super().resizeEvent(event)
+
         if hasattr(self, "enter_hint_label"):
             hint_w = 210
             hint_h = 34
@@ -470,19 +737,23 @@ class MainWindow(QWidget):
                 hint_h,
             )
 
-    def mouseDoubleClickEvent(self, event):
+    def mouseDoubleClickEvent(self, event):  # noqa: N802
         if self.current_page == "robot":
             self.show_chat_ui()
             event.accept()
             return
+
         if self.current_page == "chat":
             self.show_face_ui()
             event.accept()
             return
+
         if self.current_page == "face":
             self.show_chat_ui()
             event.accept()
             return
+
+        # 性能页只通过明确的“返回聊天”按钮返回，避免现场误操作。
         super().mouseDoubleClickEvent(event)
 
     def show_robot_ui(self):
@@ -492,9 +763,7 @@ class MainWindow(QWidget):
 
     def show_chat_ui(self):
         self.current_page = "chat"
-        self.stack.setCurrentWidget(
-            self.chat_page
-        )
+        self.stack.setCurrentWidget(self.chat_page)
 
         if self.current_state == "emotion":
             self._reset_record_button()
@@ -503,18 +772,31 @@ class MainWindow(QWidget):
 
         self.page_changed.emit("chat")
 
-        # 每次进入聊天页面时显示最新消息。
-        QTimer.singleShot(
-            0,
-            self._scroll_chat_to_bottom,
-        )
+        # 每次进入聊天页时显示最新消息。
+        QTimer.singleShot(0, self._scroll_chat_to_bottom)
 
     def show_face_ui(self):
         self.current_page = "face"
         self.stack.setCurrentWidget(self.face_page)
         self.page_changed.emit("face")
 
-    # ---------- 按钮与状态 ----------
+    def show_performance_ui(self):
+        self.current_page = "performance"
+        self.stack.setCurrentWidget(self.performance_page)
+        self.page_changed.emit("performance")
+
+    # 兼容未来主程序中可能使用的命名。
+    show_system_status_ui = show_performance_ui
+
+    def update_performance(self, snapshot):
+        """接收 PerformanceMonitor.snapshot() 并刷新第4页。"""
+        if snapshot is None:
+            return
+        self.performance_page.update_snapshot(snapshot)
+
+    # ------------------------------------------------------------------
+    # 按钮与交互状态
+    # ------------------------------------------------------------------
     def _on_record_button_clicked(self):
         if not self.is_recording:
             self.is_recording = True
@@ -530,6 +812,7 @@ class MainWindow(QWidget):
         self.set_status("可以继续说")
         self._reset_record_button()
         self.exit_chat_button.hide()
+        self.unlock_chat_emotion()
 
     def set_state_listening(self):
         self.current_state = "listening"
@@ -556,10 +839,12 @@ class MainWindow(QWidget):
         self.exit_chat_button.show()
 
     def set_state_chatting(self):
+        """一轮 TTS 播放完成后回到可继续说话状态。"""
         self.current_state = "chatting"
         self.set_status("可以继续说")
         self._reset_record_button()
         self.exit_chat_button.show()
+
 
     def set_state_error(self, message):
         self.current_state = "error"
@@ -577,29 +862,107 @@ class MainWindow(QWidget):
 
     def set_status(self, text):
         if hasattr(self, "status_label"):
-            self.status_label.setText(text)
+            self.status_label.setText(str(text or ""))
 
-    # ---------- 情绪显示 ----------
+    # ------------------------------------------------------------------
+    # 情绪显示
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _normalize_emotion_key(emotion) -> str:
+        key = str(emotion or "no_face").strip().lower()
+
+        aliases = {
+            "--": "no_face",
+            "none": "no_face",
+            "unknown": "no_face",
+            "no emotion": "no_face",
+            "no_emotion": "no_face",
+            "anger": "angry",
+            "happiness": "happy",
+            "sadness": "sad",
+            "surprised": "surprise",
+        }
+        return aliases.get(key, key)
+
+    def _chat_emotion_text(self, emotion_key: str) -> str:
+        if emotion_key in self._VISIBLE_EMOTIONS:
+            return self._EMOTION_TEXT.get(emotion_key, emotion_key)
+        return "未检测到明显情绪"
+
+    def _refresh_chat_emotion_label(self):
+        if not hasattr(self, "chat_emotion_label"):
+            return
+
+        if self._chat_emotion_locked:
+            key = self._chat_locked_emotion_key or "no_face"
+        else:
+            key = self._live_emotion_key
+
+        self.chat_emotion_label.setText(
+            f"用户当前心情：{self._chat_emotion_text(key)}"
+        )
+
+        # 锁定期间稍微加强边框；解锁后恢复普通样式。
+        self.chat_emotion_label.setProperty(
+            "emotionLocked",
+            bool(self._chat_emotion_locked),
+        )
+        self.chat_emotion_label.style().unpolish(self.chat_emotion_label)
+        self.chat_emotion_label.style().polish(self.chat_emotion_label)
+        self.chat_emotion_label.update()
+
+    def update_live_chat_emotion(self, emotion_key):
+        """更新摄像头得到的实时稳定情绪。
+
+        对话锁定期间只更新缓存，不覆盖本轮传给 LLM 的情绪显示。
+        """
+        self._live_emotion_key = self._normalize_emotion_key(emotion_key)
+        if not self._chat_emotion_locked:
+            self._refresh_chat_emotion_label()
+
+    def lock_chat_emotion(self, emotion_key):
+        """锁定并显示本轮实际传给 LLM 的情绪。"""
+        self._chat_locked_emotion_key = self._normalize_emotion_key(
+            emotion_key
+        )
+        self._chat_emotion_locked = True
+        self._refresh_chat_emotion_label()
+
+    def unlock_chat_emotion(self):
+        """解除本轮显示锁定，立即恢复实时稳定情绪。"""
+        self._chat_emotion_locked = False
+        self._chat_locked_emotion_key = None
+        self._refresh_chat_emotion_label()
+
+    # 兼容更直观的备用命名。
+    set_live_chat_emotion = update_live_chat_emotion
+    set_chat_locked_emotion = lock_chat_emotion
+    clear_chat_locked_emotion = unlock_chat_emotion
+
     def set_emotion(self, emotion, text=None, strong=False):
-        key = (emotion or "no_face").lower()
-        if key in ["--", "none", "unknown"]:
-            key = "no_face"
-        self.eyes_widget.set_emotion(key, strong)
+        """更新机器人眼睛和聊天页实时稳定情绪。
+
+        当前 main.py 已将稳定后的视觉情绪连接到该方法，因此这里同时更新
+        _live_emotion_key。对话锁定期间，标签仍显示本轮锁定情绪。
+        """
+        del text  # 保留旧接口参数，但当前页面不显示该文本。
+
+        key = self._normalize_emotion_key(emotion)
+        self.eyes_widget.set_emotion(key, bool(strong))
+        self.update_live_chat_emotion(key)
 
     def update_user_face(self, frame, emotion="no_face", prob=0.0):
-        """第三个 UI 更新：frame 为 OpenCV BGR 图像。"""
-        key = (emotion or "no_face").lower()
-        if key in ["--", "none", "unknown"]:
-            key = "no_face"
+        """第三个 UI 更新；frame 为 OpenCV BGR 图像。"""
+        key = self._normalize_emotion_key(emotion)
 
         icon_map = {
             "angry": "▰▰",
-            "happy": "⌒  ⌒",
-            "sad": "╯  ╰",
-            "neutral": "●  ●",
-            "surprise": "○  ○",
-            "fear": "◇  ◇",
-            "disgust": "—  —",
+            "happy": "⌒ ⌒",
+            "sad": "╯ ╰",
+            "neutral": "● ●",
+            "surprise": "○ ○",
+            "fear": "◇ ◇",
+            "disgust": "— —",
             "no_face": "◌",
         }
         name_map = {
@@ -614,16 +977,15 @@ class MainWindow(QWidget):
         }
 
         self.user_emotion_icon_label.setText(icon_map.get(key, "◌"))
+
         if key == "no_face":
             self.user_emotion_name_label.setText("未检测到人脸")
             self.user_emotion_prob_label.setText("请正对摄像头")
-            if hasattr(self, "face_tip_label"):
-                self.face_tip_label.setText("等待人脸")
+            self.face_tip_label.setText("等待人脸")
         else:
             self.user_emotion_name_label.setText(name_map.get(key, key))
-            self.user_emotion_prob_label.setText(f"置信度 {prob:.2f}")
-            if hasattr(self, "face_tip_label"):
-                self.face_tip_label.setText("实时识别中")
+            self.user_emotion_prob_label.setText(f"置信度 {float(prob):.2f}")
+            self.face_tip_label.setText("实时识别中")
 
         if frame is None:
             self.face_image_label.setText("暂无画面")
@@ -633,20 +995,30 @@ class MainWindow(QWidget):
         try:
             rgb = frame[:, :, ::-1].copy()
             h, w, ch = rgb.shape
-            qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888).copy()
+            qimg = QImage(
+                rgb.data,
+                w,
+                h,
+                ch * w,
+                QImage.Format_RGB888,
+            ).copy()
             pix = QPixmap.fromImage(qimg)
-            pix = pix.scaled(self.face_image_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            pix = pix.scaled(
+                self.face_image_label.size(),
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation,
+            )
             self.face_image_label.setText("")
             self.face_image_label.setPixmap(pix)
-        except Exception as e:
-            self.face_image_label.setText(f"画面显示失败：{e}")
+        except Exception as exc:
+            self.face_image_label.setText(f"画面显示失败：{exc}")
             self.face_image_label.setPixmap(QPixmap())
 
-    # ---------- 聊天消息 ----------
+    # ------------------------------------------------------------------
+    # 聊天消息
+    # ------------------------------------------------------------------
     def clear_chat(self):
-        """
-        清空聊天内容。
-        """
+        """清空聊天内容。"""
         self._message_count = 0
 
         while self.chat_layout.count():
@@ -690,7 +1062,10 @@ class MainWindow(QWidget):
         self._append_message(text, role="system")
 
     def append_emotion_message(self, emotion, text):
-        self._append_message(f"检测到情绪 {emotion} {text}", role="system")
+        self._append_message(
+            f"检测到情绪 {emotion} {text}",
+            role="system",
+        )
 
     def _append_message(self, text, role="robot"):
         if not hasattr(self, "chat_layout"):
@@ -698,10 +1073,12 @@ class MainWindow(QWidget):
 
         if self._message_count == 0:
             self._remove_empty_hint()
+
         self._message_count += 1
 
         row = QWidget()
         row.setObjectName("messageRow")
+
         row_layout = QHBoxLayout(row)
         row_layout.setContentsMargins(0, 0, 0, 0)
         row_layout.setSpacing(0)
@@ -720,21 +1097,13 @@ class MainWindow(QWidget):
             row_layout.addWidget(bubble, 0, Qt.AlignLeft)
             row_layout.addStretch(1)
 
-        insert_index = max(
-            0,
-            self.chat_layout.count() - 1,
-        )
+        insert_index = max(0, self.chat_layout.count() - 1)
+        self.chat_layout.insertWidget(insert_index, row)
 
-        self.chat_layout.insertWidget(
-            insert_index,
-            row,
-        )
-
-        # 将本次新增的消息传入，自动定位到最新气泡。
         self._scroll_chat_to_bottom(row)
 
     def _remove_empty_hint(self):
-        """移除空提示，但不要销毁它。"""
+        """移除空提示，但不销毁提示控件。"""
         self._ensure_empty_hint_label()
         self.empty_hint_label.hide()
 
@@ -743,6 +1112,7 @@ class MainWindow(QWidget):
             widget = item.widget()
             if widget is None:
                 continue
+
             if widget is self.empty_hint_label:
                 widget.hide()
                 widget.setParent(self.chat_content)
@@ -751,29 +1121,16 @@ class MainWindow(QWidget):
 
         self.chat_layout.addStretch(1)
 
-    def _scroll_chat_to_bottom(
-        self,
-        target_widget=None,
-    ):
-        """
-        将聊天区域自动滚动到最新消息。
-
-        第一次延迟等待控件插入布局；
-        第二次延迟等待 QLabel 完成自动换行和高度计算。
-        """
+    def _scroll_chat_to_bottom(self, target_widget=None):
+        """自动滚动到最新消息，兼顾板端较慢的布局刷新。"""
 
         def do_scroll():
-            if not hasattr(
-                self,
-                "chat_scroll",
-            ):
+            if not hasattr(self, "chat_scroll"):
                 return
 
-            # 强制刷新聊天布局及内容高度。
             self.chat_layout.activate()
             self.chat_content.updateGeometry()
 
-            # 优先确保本次新消息进入可见区域。
             if target_widget is not None:
                 self.chat_scroll.ensureWidgetVisible(
                     target_widget,
@@ -781,46 +1138,31 @@ class MainWindow(QWidget):
                     16,
                 )
 
-            # 最终强制移动到滚动条底部。
-            scroll_bar = (
-                self.chat_scroll
-                .verticalScrollBar()
-            )
-            scroll_bar.setValue(
-                scroll_bar.maximum()
-            )
+            scroll_bar = self.chat_scroll.verticalScrollBar()
+            scroll_bar.setValue(scroll_bar.maximum())
 
-        # 等待新控件加入布局。
-        QTimer.singleShot(
-            0,
-            do_scroll,
-        )
+        QTimer.singleShot(0, do_scroll)
+        QTimer.singleShot(60, do_scroll)
+        QTimer.singleShot(150, do_scroll)
 
-        # 等待文字自动换行和气泡高度计算完成。
-        QTimer.singleShot(
-            60,
-            do_scroll,
-        )
-
-        # 板端性能较慢时再校正一次。
-        QTimer.singleShot(
-            150,
-            do_scroll,
-        )
-
-    # ---------- 退出逻辑 ----------
-    def closeEvent(self, event):
+    # ------------------------------------------------------------------
+    # 退出逻辑
+    # ------------------------------------------------------------------
+    def closeEvent(self, event):  # noqa: N802 - Qt 命名约定
         self.exit_program_clicked.emit()
         event.accept()
 
-    def keyPressEvent(self, event):
+    def keyPressEvent(self, event):  # noqa: N802 - Qt 命名约定
         if event.key() == Qt.Key_Escape:
             self.exit_program_clicked.emit()
         else:
             super().keyPressEvent(event)
 
-    # ---------- 样式 ----------
-    def _style_sheet(self):
+    # ------------------------------------------------------------------
+    # 样式
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _style_sheet():
         return """
         QWidget {
             background: transparent;
@@ -839,28 +1181,61 @@ class MainWindow(QWidget):
             background: transparent;
         }
 
-        #chatPage, #facePage {
+        #chatPage,
+        #facePage {
             background: transparent;
         }
 
-        #titleLabel, #faceTitleLabel {
-            font-size: 34px;
+        #titleLabel,
+        #faceTitleLabel {
+            font-size: 32px;
             font-weight: 800;
             color: #FFFFFF;
             background: transparent;
         }
 
         #subtitleLabel {
-            font-size: 16px;
+            font-size: 15px;
             color: rgba(180, 220, 255, 155);
             background: transparent;
         }
 
         #statusLabel {
-            font-size: 22px;
+            font-size: 20px;
             font-weight: 700;
             color: #68E1FF;
             background: transparent;
+        }
+
+        #chatEmotionLabel {
+            color: rgba(218, 240, 250, 210);
+            background-color: rgba(4, 22, 36, 125);
+            border: 1px solid rgba(100, 210, 255, 45);
+            border-radius: 11px;
+            padding: 3px 9px;
+            font-size: 14px;
+            font-weight: 650;
+        }
+
+        #chatEmotionLabel[emotionLocked="true"] {
+            color: #FFFFFF;
+            background-color: rgba(0, 112, 210, 105);
+            border: 1px solid rgba(104, 225, 255, 130);
+        }
+
+        #systemStatusButton {
+            color: rgba(225, 245, 255, 235);
+            background-color: rgba(13, 31, 50, 210);
+            border: 1px solid rgba(110, 205, 255, 90);
+            border-radius: 17px;
+            padding: 6px 10px;
+            font-size: 16px;
+            font-weight: 700;
+        }
+
+        #systemStatusButton:hover {
+            background-color: rgba(20, 55, 84, 235);
+            border-color: rgba(104, 225, 255, 175);
         }
 
         #chatPanel {
@@ -869,7 +1244,8 @@ class MainWindow(QWidget):
             border: 1px solid rgba(100, 210, 255, 55);
         }
 
-        #chatScroll, #chatContent {
+        #chatScroll,
+        #chatContent {
             background: transparent;
             border: none;
         }
@@ -901,7 +1277,7 @@ class MainWindow(QWidget):
 
         #emptyHintLabel {
             color: rgba(185, 220, 240, 130);
-            font-size: 26px;
+            font-size: 25px;
             font-weight: 700;
             background: transparent;
         }
@@ -938,7 +1314,6 @@ class MainWindow(QWidget):
         #bubbleText {
             color: #FFFFFF;
             font-size: 24px;
-            line-height: 1.45;
             background: transparent;
         }
 
@@ -1039,6 +1414,6 @@ class MainWindow(QWidget):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    win = MainWindow()
-    win.showFullScreen()
+    window = MainWindow()
+    window.showFullScreen()
     sys.exit(app.exec_())

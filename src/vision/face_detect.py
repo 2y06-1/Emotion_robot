@@ -1,9 +1,9 @@
-# coding: utf-8
 from __future__ import annotations
 
 import cv2
 import numpy as np
 import onnxruntime as ort
+
 
 class Face_Detect:
     """
@@ -18,31 +18,34 @@ class Face_Detect:
         self.load_model()
 
     def load_model(self):
+        """加载ONNX人脸检测模型。"""
         try:
             session_options = ort.SessionOptions()
             session_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
             session_options.intra_op_num_threads = self.threads
             session_options.inter_op_num_threads = 1
 
+            # 根据配置选择推理设备。
             if self.provider == "cpu":
                 providers = ["CPUExecutionProvider"]
             else:
                 available = ort.get_available_providers()
                 providers = []
+
+                # 优先使用SpaceMIT执行器，不可用时回退到CPU。
                 if "SpaceMITExecutionProvider" in available:
                     providers.append("SpaceMITExecutionProvider")
+
                 providers.append("CPUExecutionProvider")
 
-            self.face_model = ort.InferenceSession(
-                self.model_path,
-                session_options,
-                providers=providers,
-            )
+            self.face_model = ort.InferenceSession(self.model_path, session_options, providers=providers)
+
         except Exception as e:
             print(f"加载模型失败: {e}", flush=True)
             self.face_model = None
 
     def img_convert(self, img, img_size):
+        """将图像转换为模型需要的输入格式。"""
         try:
             img_size = int(img_size)
             input_img = cv2.resize(img, (img_size, img_size))
@@ -51,12 +54,14 @@ class Face_Detect:
             input_img *= 1.0 / 255.0
             input_img = np.expand_dims(input_img, axis=0)
             return input_img
+
         except Exception as e:
             print(f"图像预处理失败: {e}", flush=True)
             return None
 
     @staticmethod
     def iou(box1, box2):
+        """计算两个检测框的交并比。"""
         x1 = max(box1[0], box2[0])
         y1 = max(box1[1], box2[1])
         x2 = min(box1[2], box2[2])
@@ -70,26 +75,31 @@ class Face_Detect:
         return inter / union if union != 0 else 0
 
     def nms(self, boxes, iou_threshold):
+        """使用非极大值抑制去除重复检测框。"""
         if len(boxes) == 0:
             return []
 
         iou_threshold = float(iou_threshold)
+
+        # 按置信度从高到低排序。
         boxes = sorted(boxes, key=lambda x: x[4], reverse=True)
 
         keep = []
+
         while boxes:
             best = boxes.pop(0)
             keep.append(best)
-            boxes = [
-                box for box in boxes
-                if self.iou(best, box) < iou_threshold
-            ]
+
+            # 删除与当前检测框重叠程度过高的框。
+            boxes = [box for box in boxes if self.iou(best, box) < iou_threshold]
 
         return keep
 
     def detect_face(self, img, img_size, conf_threshold, iou_threshold):
+        """检测图像中的人脸并返回检测框。"""
         if img is None:
             return []
+
         if self.face_model is None:
             return []
 
@@ -99,29 +109,34 @@ class Face_Detect:
 
         h, w = img.shape[:2]
         input_img = self.img_convert(img, img_size)
+
         if input_img is None:
             return []
 
-        outputs = self.face_model.run(
-            None,
-            {self.face_model.get_inputs()[0].name: input_img},
-        )
+        # 执行ONNX模型推理。
+        outputs = self.face_model.run( None, {self.face_model.get_inputs()[0].name: input_img})
 
         preds = outputs[0][0]
+
+        # 兼容输出形状为[5, N]的情况。
         if preds.shape[0] == 5 and preds.shape[1] > 5:
             preds = preds.T
 
         boxes = []
+
         for p in preds:
             cx, cy, bw, bh, conf = p[:5]
+
             if conf < conf_threshold:
                 continue
 
+            # 将中心点格式转换为左上角、右下角坐标。
             x1 = cx - bw / 2
             y1 = cy - bh / 2
             x2 = cx + bw / 2
             y2 = cy + bh / 2
 
+            # 将模型输入尺寸坐标映射回原图尺寸。
             x1 = int(x1 * w / img_size)
             y1 = int(y1 * h / img_size)
             x2 = int(x2 * w / img_size)
@@ -134,12 +149,6 @@ class Face_Detect:
     def crop(self, frame, boxes, pad, extra_ratio):
         """
         根据人脸框裁剪正方形人脸ROI。
-
-        与原版本相比：
-        1. 减少背景区域；
-        2. 保证ROI为正方形；
-        3. 避免情绪模型将长方形人脸强行拉伸为正方形；
-        4. 保留完整的额头、眼睛和嘴部。
         """
         faces = []
 
@@ -168,11 +177,7 @@ class Face_Detect:
             base_size = max(box_w, box_h)
 
             # pad作为固定像素扩张，extra_ratio作为比例扩张。
-            side_length = int(
-                base_size * (1.0 + 2.0 * extra_ratio)
-                + 2 * pad
-            )
-
+            side_length = int(base_size * (1.0 + 2.0 * extra_ratio) + 2 * pad)
             side_length = max(side_length, 1)
 
             half = side_length / 2.0
@@ -207,23 +212,11 @@ class Face_Detect:
             square_x2 = min(frame_w, square_x2)
             square_y2 = min(frame_h, square_y2)
 
-            face = frame[
-                square_y1:square_y2,
-                square_x1:square_x2,
-            ]
+            face = frame[square_y1:square_y2, square_x1:square_x2]
 
             if face.size == 0:
                 continue
 
-            faces.append(
-                (
-                    square_x1,
-                    square_y1,
-                    square_x2,
-                    square_y2,
-                    conf,
-                    face,
-                )
-            )
+            faces.append((square_x1, square_y1, square_x2, square_y2, conf, face))
 
         return faces

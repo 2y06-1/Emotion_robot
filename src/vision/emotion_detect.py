@@ -1,4 +1,3 @@
-# coding: utf-8
 from __future__ import annotations
 
 from typing import Sequence
@@ -26,35 +25,21 @@ def make_onnx_session(model_path: str, provider: str, threads: int) -> ort.Infer
     else:
         available = ort.get_available_providers()
         providers = []
+
         if "SpaceMITExecutionProvider" in available:
             providers.append("SpaceMITExecutionProvider")
+
         providers.append("CPUExecutionProvider")
 
-    return ort.InferenceSession(
-        str(model_path),
-        sess_options=options,
-        providers=providers,
-    )
+    return ort.InferenceSession(str(model_path), sess_options=options, providers=providers)
+
 
 class EmotionClassifier:
     """
     表情分类模块。
     """
 
-    def __init__(
-        self,
-        model_path,
-        img_size,
-        top_k,
-        threads,
-        provider,
-        class_names: Sequence[str],
-        mean: Sequence[float],
-        std: Sequence[float],
-        auto_enhance: bool = False,
-        enhance_dark_threshold: float = 70.0,
-        gamma: float = 1.6,
-    ):
+    def __init__(self, model_path, img_size, top_k, threads, provider, class_names: Sequence[str], mean: Sequence[float], std: Sequence[float], auto_enhance: bool = False, enhance_dark_threshold: float = 70.0, gamma: float = 1.6):
         self.model_path = str(model_path)
         self.img_size = int(img_size)
         self.top_k = int(top_k)
@@ -68,22 +53,19 @@ class EmotionClassifier:
 
         if len(self.class_names) == 0:
             raise ValueError("class_names 不能为空")
+
         if self.mean.shape[0] != 3 or self.std.shape[0] != 3:
             raise ValueError("mean 和 std 必须是长度为 3 的列表")
 
-        self.session = make_onnx_session(
-            model_path=self.model_path,
-            provider=provider,
-            threads=int(threads),
-        )
+        self.session = make_onnx_session(model_path=self.model_path, provider=provider, threads=int(threads))
         self.input_name = self.session.get_inputs()[0].name
         self.output_names = [o.name for o in self.session.get_outputs()]
-
 
     @staticmethod
     def gray_mean(bgr_image: np.ndarray) -> float:
         if bgr_image is None or bgr_image.size == 0:
             return 0.0
+
         gray = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2GRAY)
         return float(gray.mean())
 
@@ -93,6 +75,7 @@ class EmotionClassifier:
             return bgr_image
 
         mean_gray = self.gray_mean(bgr_image)
+
         if mean_gray >= self.enhance_dark_threshold:
             return bgr_image
 
@@ -100,10 +83,7 @@ class EmotionClassifier:
 
         # gamma > 1 时，通过 1/gamma 曲线提亮暗部。
         inv_gamma = 1.0 / max(self.gamma, 1e-6)
-        table = np.array(
-            [((i / 255.0) ** inv_gamma) * 255 for i in range(256)],
-            dtype=np.uint8,
-        )
+        table = np.array([((i / 255.0) ** inv_gamma) * 255 for i in range(256)], dtype=np.uint8)
         img = cv2.LUT(img, table)
 
         # 对亮度通道做 CLAHE，提升脸部局部对比度。
@@ -113,22 +93,17 @@ class EmotionClassifier:
         l = clahe.apply(l)
         lab = cv2.merge((l, a, b))
         img = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+
         return img
 
     def preprocess(self, bgr_image: np.ndarray) -> np.ndarray:
         img = self.enhance_dark_face(bgr_image)
-
-        img = cv2.resize(
-            img,
-            (self.img_size, self.img_size),
-            interpolation=cv2.INTER_LINEAR,
-        )
+        img = cv2.resize(img, (self.img_size, self.img_size), interpolation=cv2.INTER_LINEAR)
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         img = img.astype(np.float32) / 255.0
-
         img = (img - self.mean) / self.std
-
         img = img.transpose(2, 0, 1).astype(np.float32)
+
         return img[None]
 
     def _to_probs(self, raw_output: np.ndarray) -> np.ndarray:
@@ -140,6 +115,7 @@ class EmotionClassifier:
 
         # 如果 ONNX 已经输出概率，就不要再次 softmax。
         s = float(out.sum())
+
         if np.all(out >= 0) and 0.98 <= s <= 1.02:
             probs = out.astype(np.float32)
         else:
@@ -147,10 +123,7 @@ class EmotionClassifier:
 
         # 如果模型输出类别数比 class_names 多/少，直接打印提醒。
         if len(probs) != len(self.class_names):
-            print(
-                f"[emotion warn] 模型输出类别数={len(probs)}，class_names数量={len(self.class_names)}，请检查 ONNX 是否导错或标签顺序是否错。",
-                flush=True,
-            )
+            print(f"[emotion warn] 模型输出类别数={len(probs)}，class_names数量={len(self.class_names)}，请检查 ONNX 是否导错或标签顺序是否错。", flush=True)
 
         return probs
 
@@ -159,13 +132,7 @@ class EmotionClassifier:
         输入一张BGR人脸图像，返回所有类别的概率。
         """
         input_tensor = self.preprocess(bgr_image)
-
-        outputs = self.session.run(
-            None,
-            {
-                self.input_name: input_tensor,
-            },
-        )
+        outputs = self.session.run(None, {self.input_name: input_tensor})
 
         return self._to_probs(outputs[0])
 
@@ -187,28 +154,13 @@ class EmotionClassifier:
         else:
             k = int(top_k)
 
-        k = max(
-            1,
-            min(
-                k,
-                len(self.class_names),
-                len(probs),
-            ),
-        )
-
+        k = max(1, min(k, len(self.class_names), len(probs)))
         indices = np.argsort(probs)[::-1][:k]
-
         results = []
 
         for index in indices:
             index = int(index)
-
-            results.append(
-                (
-                    self.class_names[index],
-                    float(probs[index]),
-                )
-            )
+            results.append((self.class_names[index], float(probs[index])))
 
         return results
 
@@ -219,9 +171,5 @@ class EmotionClassifier:
         返回格式：
         ("happy", 0.82)
         """
-        top1 = self.predict_topk(
-            bgr_image,
-            top_k=1,
-        )
-
+        top1 = self.predict_topk(bgr_image, top_k=1)
         return top1[0]
